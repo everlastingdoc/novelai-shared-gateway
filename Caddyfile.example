@@ -3,7 +3,7 @@ gateway.example.com {
     @private path /admin* /api/admin* /api/health /memory
     respond @private 404
     reverse_proxy 127.0.0.1:18081 {
-        header_up Host gateway.example.com
+        # 默认保留客户端 Host（含端口），与成员门户的 Origin 校验保持一致。
         flush_interval -1
     }
     # 不启用包含查询参数的访问日志；兼容 URL 可能携带调用 Key。

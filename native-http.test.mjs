@@ -90,7 +90,7 @@ test('独立公开发行版从初始化到真实 HTTP 返回、扣费、退款�
   const env = Object.fromEntries(['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE'].filter(name => process.env[name]).map(name => [name, process.env[name]]));
   Object.assign(env, { ADMIN_TOKEN: adminToken, DATA_DIR: dataDir, HOST: '127.0.0.1', PORT: String(gatewayPort),
     NOVELAI_API_URL: `http://127.0.0.1:${upstreamPort}`, NOVELAI_ACCOUNT_API_URL: `http://127.0.0.1:${upstreamPort}`,
-    PUBLIC_BASE_URL: baseUrl, PUBLIC_HOST: 'gateway.example' });
+    PUBLIC_BASE_URL: 'https://gateway.example:8443', PUBLIC_HOST: 'gateway.example:8443', PUBLIC_HOST_ALIASES: 'gateway.example' });
   const child = spawn(process.execPath, ['server/index.js'], { cwd: root, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let runtimeOutput = '';
   const record = chunk => { runtimeOutput = (runtimeOutput + chunk.toString('utf8')).slice(-8000); };
@@ -166,6 +166,41 @@ test('独立公开发行版从初始化到真实 HTTP 返回、扣费、退款�
     near((await quota(1)).v5Available, before.v5Available);
   });
 
+  await t.test('8443 反代 Host 支持成员登录与 Native 生图，其他端口和公网管理仍被拒绝', async () => {
+    const publicOrigin = 'https://gateway.example:8443';
+    const requestPublic = (pathname, { method = 'GET', headers = {}, payload } = {}) => new Promise((resolve, reject) => {
+      const request = http.request(baseUrl + pathname, { method, headers: { host: 'gateway.example:8443', origin: publicOrigin, ...headers } }, response => {
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
+        response.on('error', reject);
+      });
+      request.on('error', reject);
+      request.setTimeout(15000, () => request.destroy(new Error('8443 request timeout')));
+      request.end(payload === undefined ? undefined : JSON.stringify(payload));
+    });
+    const login = await requestPublic('/api/member/login', { method: 'POST', headers: { 'content-type': 'application/json' },
+      payload: { username: credentials[0].username, password: credentials[0].password } });
+    assert.equal(login.status, 200);
+    assert.match(login.headers['set-cookie'][0], /; Secure/);
+    const cookie = login.headers['set-cookie'][0].split(';')[0];
+    const key = await requestPublic('/api/member/key', { headers: { cookie } });
+    assert.equal(key.status, 200);
+    assert.deepEqual(JSON.parse(key.body), { apiKey: credentials[0].api_key, baseUrl: `${publicOrigin}/v1` });
+    assert.equal((await requestPublic('/api/member/key', { headers: { cookie, origin: 'https://gateway.example' } })).status, 403);
+    assert.equal((await requestPublic('/api/member/me', { headers: { cookie, host: 'gateway.example:9443' } })).status, 403);
+    for (const pathname of ['/admin', '/api/admin/member-management', '/api/admin/summary', '/api/admin/gallery', '/api/admin/gallery/images/img_unknown/content']) {
+      assert.equal((await requestPublic(pathname, { headers: { 'x-admin-token': adminToken } })).status, 404);
+    }
+    const generated = await requestPublic('/ai/generate-image-stream', { method: 'POST',
+      headers: { authorization: `Bearer ${credentials[0].api_key}`, 'content-type': 'application/json', origin: 'https://client.example' }, payload: body() });
+    assert.equal(generated.status, 200);
+    const [event] = readNativeEvents(generated.body);
+    assert.equal(event.event_type, 'final');
+    assert.deepEqual(Buffer.from(event.image), png);
+    assert.equal(calls.at(-1).payload.parameters.steps, 23);
+  });
+
   await t.test('Full、5C 与 Medium 从两个流式路径返回可解码最终图，按实际参数只扣本人', async () => {
     for (const [model, pathname] of [['nai-diffusion-5-full', '/ai/generate-image-stream'], ['nai-diffusion-5-curated', '/v1/ai/generate-image-stream'], ['nai-diffusion-5-full-medium', '/ai/generate-image-stream']]) {
       const input = body(model), before = await quota(), other = await quota(1);
@@ -214,6 +249,36 @@ test('独立公开发行版从初始化到真实 HTTP 返回、扣费、退款�
     assert.equal(response.status, 429); assert.equal(response.headers.get('retry-after'), '30');
     near((await quota()).v5Available, before.v5Available);
     assert.equal(calls.length, failAt);
+  });
+
+  await t.test('真实网关图库仅管理员可用，图片核对归属，签名取图与清理后的历史保持一致', async () => {
+    const headers = { 'x-admin-token': adminToken, origin: baseUrl, 'content-type': 'application/json' };
+    for (const denied of [{}, { cookie: cookies[0] }, { authorization: `Bearer ${credentials[0].api_key}` }]) {
+      assert.equal((await fetchLocal('/api/admin/gallery?view=summary', { headers: denied })).status, 403);
+    }
+    const summary = await (await fetchLocal('/api/admin/gallery?view=summary', { headers })).json();
+    assert.equal(summary.retentionDays, 3); assert.ok(summary.count >= 2);
+    const me = await (await fetchLocal('/api/member/me', { headers: { cookie: cookies[0] } })).json();
+    const job = me.jobs.find(job => job.status === 'done');
+    const jobData = await (await fetchLocal(`/api/jobs/${job.id}`, { headers: { authorization: `Bearer ${credentials[0].api_key}` } })).json();
+    const imagePath = `/api/images/${jobData.imageId}/content`;
+    assert.equal((await fetchLocal(imagePath, { headers: { authorization: `Bearer ${credentials[1].api_key}` } })).status, 403);
+    assert.deepEqual(Buffer.from(await (await fetchLocal(imagePath, { headers: { authorization: `Bearer ${credentials[0].api_key}` } })).arrayBuffer()), png);
+    assert.deepEqual(Buffer.from(await (await fetchLocal(jobData.imageUrl)).arrayBuffer()), png);
+    const adminContent = await fetchLocal(`/api/admin/gallery/images/${jobData.imageId}/content`, { headers });
+    assert.equal(adminContent.status, 200); assert.equal(adminContent.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(Buffer.from(await adminContent.arrayBuffer()), png);
+    const before = await quota();
+    const preview = await (await fetchLocal('/api/admin/gallery', { method: 'POST', headers,
+      body: JSON.stringify({ action: 'preview-delete', mode: 'selected', ids: [jobData.imageId] }) })).json();
+    assert.equal(preview.total, 1);
+    const removed = await fetchLocal('/api/admin/gallery', { method: 'POST', headers, body: JSON.stringify({ action: 'delete', planId: preview.planId }) });
+    assert.equal(removed.status, 200); assert.equal((await removed.json()).deleted, 1);
+    assert.deepEqual(await quota(), before);
+    assert.equal((await fetchLocal(`/api/jobs/${job.id}/content`, { headers: { authorization: `Bearer ${credentials[0].api_key}` } })).status, 404);
+    const history = await (await fetchLocal(`/api/jobs/${job.id}`, { headers: { authorization: `Bearer ${credentials[0].api_key}` } })).json();
+    assert.equal(history.status, 'done'); assert.equal(history.imageId, '');
+    assert.equal((await fetchLocal(jobData.imageUrl)).status, 404);
   });
 
   await stop();

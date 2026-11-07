@@ -5,11 +5,11 @@
   "main": "server/index.js",
   "type": "module",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js",
+    "start": "node --env-file=.env server/index.js",
+    "dev": "node --env-file=.env --watch server/index.js",
     "test": "node --test server/*.test.mjs scripts/*.test.mjs *.test.mjs native-adapter-test.mjs",
     "check": "node scripts/check.mjs",
-    "bootstrap": "node scripts/bootstrap.mjs"
+    "bootstrap": "node --env-file=.env scripts/bootstrap.mjs"
   },
   "engines": {
     "node": ">=22"

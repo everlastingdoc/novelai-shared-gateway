@@ -1,5 +1,5 @@
 // 共享模式仅开放成员门户、管理与生图所需接口，旧功能及静态回退不再可达。
-const staticPaths = new Set(['/account.html', '/account.js', '/members.css', '/shared-status.js', '/admin/members.html', '/admin/members.js']);
+const staticPaths = new Set(['/account.html', '/account.js', '/members.css', '/shared-status.js', '/admin/members.html', '/admin/members.js', '/admin/gallery.js', '/admin/gallery.css']);
 const routes = new Map([
   ['/api/health', ['GET', 'HEAD']],
   ['/api/me/quota', ['GET']],
@@ -21,6 +21,7 @@ const routes = new Map([
   ['/api/jobs', ['POST']],
   ['/api/jobs/events', ['GET']],
   ['/api/admin/member-management', ['GET', 'POST']],
+  ['/api/admin/gallery', ['GET', 'POST']],
   ['/api/admin/summary', ['GET']],
   ['/api/admin/ping', ['GET']],
   ['/api/admin/accounts', ['POST', 'PATCH']],
@@ -37,5 +38,6 @@ export function sharedSurface(pathname, method = 'GET') {
   if (/^\/api\/jobs\/[^/]+(?:\/content)?$/.test(pathname)) methods ||= ['GET'];
   if (/^\/api\/images\/[^/]+\/content$/.test(pathname)) methods = ['GET'];
   if (/^\/api\/admin\/accounts\/[^/]+$/.test(pathname)) methods ||= ['PATCH'];
+  if (/^\/api\/admin\/gallery\/images\/[a-zA-Z0-9_-]{1,128}\/content$/.test(pathname)) methods = ['GET', 'HEAD'];
   return { allowed: Boolean(methods && (methods.includes(method) || method === 'OPTIONS')), pathname };
 }

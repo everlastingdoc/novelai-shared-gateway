@@ -7,6 +7,7 @@ import { privateAccessAllowed } from './public-hosts.js';
 import { launcherSubscription } from './launcher-subscription.js';
 import { sharedSurface } from './shared-surface.js';
 import { handleMemberRoutes } from './member-routes.js';
+import { AdminGallery } from './admin-gallery.js';
 import { configureFairQuota, syncFairQuota, reserveFairQuota, settleFairQuota, fairQuotaSummary, quoteFairRequest } from './fair-quota.js';
 import http from 'node:http';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -34,9 +35,11 @@ if (adminToken.length < 32 || /^(change|replace|example)/i.test(adminToken)) thr
 process.env.FAIR_SHARE_MODE = 'true';
 process.env.PRIVATE_MODE = 'true';
 process.env.PUBLIC_MODE = 'true';
+// 保留旧的按数量裁剪与整库清理保护；图库通过 AdminGallery 独立执行按天保留。
 process.env.NO_AUTO_DELETE = 'true';
 process.env.MOCK_WHEN_NO_ACCOUNT = 'false';
 const store = new JsonStore(dataDir);
+const gallery = new AdminGallery({ store, dataDir });
 const fairShareMode = process.env.FAIR_SHARE_MODE === 'true';
 // 公平账本和任务状态必须同步落盘，不能使用延迟写入。
 if (fairShareMode) {
@@ -112,6 +115,7 @@ await mkdir(imageDir, { recursive: true });
 await migrateInlineImages();
 await ensureAccountRouteIds();
 await applyRuntimeSettings();
+await gallery.init();
 await cleanupImageStorage().catch((error) => console.error('Failed to cleanup image storage:', error));
 
 const server = http.createServer(async (req, res) => {
@@ -150,6 +154,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`NovelAI Shared Gateway listening on http://${host}:${port}`);
   startAccountQuotaAutoRefresh();
+  gallery.start();
   logStartupQueueState().catch((error) => console.error('[runtime] failed to inspect startup queue:', error)).finally(() => {
     scheduleQueueDrain();
   });
@@ -271,6 +276,7 @@ async function route(req, res) {
     // 所有管理员别名都只从本机隧道进入，不能绕过代理的路径规则。
     if (/^\/(?:admin|api\/admin)(?:\/|$)/.test(url.pathname) && !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(String(req.headers.host || ''))) throw httpError(404, 'not found.');
   }
+  if (await gallery.handle(req, res, url, { assertAdmin })) return;
   if (await handleMemberRoutes(req, res, url, { store, assertAdmin, createId, createPublicToken })) return;
   if (await publicSelfUseGuard(req, res, url, method)) return;
 
@@ -495,6 +501,7 @@ async function route(req, res) {
         return;
       }
     }
+    if (job.status === 'done') throw httpError(404, 'image has expired or was deleted.');
     if (job.status !== 'failed') throw httpError(409, 'job is not finished.');
     const image = buildErrorImage(job.error || 'Generation failed');
     sendImage(res, 200, image.mimeType, image.buffer, { 'x-error': '1' });
@@ -520,6 +527,7 @@ async function route(req, res) {
     const id = decodeURIComponent(url.pathname.split('/').at(-2) || '');
     const image = await store.findImage(id);
     if (!image) throw httpError(404, 'image not found.');
+    if (!isAdmin(req, url) && !validPublicImageSignature(url) && image.token !== tokenFrom(req, url)) throw httpError(403, 'forbidden.');
     await sendStoredImage(res, 200, image);
     return;
   }
@@ -4533,6 +4541,7 @@ function installShutdownHandlers(serverInstance) {
     shuttingDown = true;
     console.log(`[runtime] ${signal} received. Flushing SQLite changes before shutdown.`);
     if (accountQuotaRefreshTimer) clearTimeout(accountQuotaRefreshTimer);
+    const galleryStopped = gallery.stop();
     try {
       store.flushSync();
     } catch (error) {
@@ -4540,7 +4549,7 @@ function installShutdownHandlers(serverInstance) {
     }
     const forceTimer = setTimeout(() => process.exit(0), 5000);
     forceTimer.unref?.();
-    serverInstance.close(() => process.exit(0));
+    serverInstance.close(() => { galleryStopped.finally(() => { store.flushSync(); process.exit(0); }); });
   };
   process.once('SIGTERM', () => shutdown('SIGTERM'));
   process.once('SIGINT', () => shutdown('SIGINT'));

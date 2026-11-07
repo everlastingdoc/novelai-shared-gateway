@@ -1,0 +1,24 @@
+[Unit]
+Description=NovelAI Shared Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nai-share
+Group=nai-share
+WorkingDirectory=/opt/nai_share
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node --env-file=/opt/nai_share/.env /opt/nai_share/server/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/nai_share/data
+
+[Install]
+WantedBy=multi-user.target

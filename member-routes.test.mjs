@@ -32,6 +32,14 @@ test('独立登录、只读隔离、管理员权限、CSRF、重置与事务失�
  r=await call('/api/member/login',{body:{username:'test-member-b',password:'Valid-password-member-b'},headers:{Host:'nai.example',Origin:'https://nai.example'}});assert.equal(r.status,200);assert.match(r.headers.get('set-cookie'),/; Secure/);
  r=await call('/api/admin/member-management',{headers:{Host:'nai.example',Origin:'https://nai.example','x-admin-token':'test-admin'}});assert.equal(r.status,404);
 
+ // 反代保留非标准 HTTPS 端口时，登录 Cookie 和同源校验使用完整 Host。
+ const portHeaders={Host:'nai.example:8443',Origin:'https://nai.example:8443'};
+ r=await call('/api/member/login',{body:{username:'test-member-b',password:'Valid-password-member-b'},headers:portHeaders});assert.equal(r.status,200);assert.match(r.headers.get('set-cookie'),/; Secure/);
+ const portCookie=r.headers.get('set-cookie').split(';')[0];
+ r=await call('/api/member/key',{cookie:portCookie,headers:portHeaders});assert.equal(r.status,200);assert.equal((await r.json()).apiKey,'NAI-b');
+ r=await call('/api/member/key',{cookie:portCookie,headers:{...portHeaders,Origin:'https://nai.example'}});assert.equal(r.status,403);
+ r=await call('/api/admin/member-management',{headers:{...portHeaders,'x-admin-token':'test-admin'}});assert.equal(r.status,404);
+
  // 管理新增操作使用同一私有入口；成员 Cookie 与 Key 都不能提权。
  const manage=body=>call('/api/admin/member-management',{body,headers:{'x-admin-token':'test-admin'}});
  for(const action of ['member-key','member-status','preview-groups']){r=await call('/api/admin/member-management',{body:{action,userId:'b',enabled:false,groups:[]},cookie,headers:{authorization:'Bearer NAI-a'}});assert.equal(r.status,403);}

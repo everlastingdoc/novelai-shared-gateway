@@ -30,8 +30,25 @@ test('Host 白名单不接受转发头冒充；公开插件跨域与本机同源
   }
 });
 
+test('公开入口支持显式端口，主域名和别名均精确匹配端口', () => {
+  const portEnv = { PUBLIC_MODE: 'true', PUBLIC_HOST: 'nai.example:8443', PUBLIC_HOST_ALIASES: ' backup.example:9443 ' };
+  for (const host of ['nai.example:8443', 'NAI.EXAMPLE:8443', 'backup.example:9443']) assert.equal(isPublicHost(host, portEnv), true, host);
+  for (const host of ['nai.example', 'nai.example:443', 'nai.example:9443', 'backup.example', 'backup.example:8443', 'evil.nai.example:8443']) {
+    assert.equal(isPublicHost(host, portEnv), false, host);
+  }
+  for (const host of ['nai.example:0', 'nai.example:65536', 'nai.example:08443', 'nai.example:', 'nai.example:+8443', 'nai.example:8443:1', 'https://nai.example:8443', 'user@nai.example:8443', 'nai.example:8443/path', 'nai.example:8443 ', ' nai.example:8443', 'nai.example:8443\n']) {
+    assert.equal(isPublicHost(host, { PUBLIC_MODE: 'true', PUBLIC_HOST: host }), false, host);
+  }
+  assert.equal(isPublicHost('nai.example:65535', { ...portEnv, PUBLIC_HOST: 'nai.example:65535' }), true);
+  assert.equal(privateAccessAllowed(request('nai.example:8443', '/ai/user/subscription', { origin: 'https://client.example', 'sec-fetch-site': 'cross-site' }), portEnv), true);
+  assert.equal(privateAccessAllowed(request('evil.example:8443', '/', { 'x-forwarded-host': 'nai.example:8443' }), portEnv), false);
+  for (const url of ['/admin', '/api/admin/member-management', '/memory']) {
+    assert.equal(privateAccessAllowed(request('nai.example:8443', url, { origin: 'https://evil.example' }), portEnv), false, url);
+  }
+});
+
 test('新公开别名即使同源且带管理员凭据，也不能进入成员管理路由', async () => {
-  for (const host of ['old.example', 'nai.example', 'nai-direct.example']) {
+  for (const host of ['old.example', 'nai.example', 'nai-direct.example', 'nai.example:8443']) {
     let adminChecked = false;
     await assert.rejects(handleMemberRoutes(request(host, '/api/admin/member-management', { origin: `https://${host}`, 'x-admin-token': 'synthetic-admin' }), {}, new URL(`https://${host}/api/admin/member-management`), {
       assertAdmin() { adminChecked = true; }

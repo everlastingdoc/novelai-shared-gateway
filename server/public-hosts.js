@@ -1,15 +1,23 @@
 const localHost = /^(127\.0\.0\.1|localhost)(:\d{1,5})?$/;
 const dnsHost = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
+function publicAuthority(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.toLowerCase();
+  const match = /^([^:]+)(?::([1-9][0-9]{0,4}))?$/.exec(normalized);
+  if (!match || match[0] !== normalized || !dnsHost.test(match[1]) || (match[2] && Number(match[2]) > 65535)) return null;
+  return match[1] + (match[2] ? `:${match[2]}` : '');
+}
+
 // 仅按 Host 与显式配置逐项匹配；不信任转发头、通配符、后缀或 URL 格式配置。
 export function isPublicHost(host, env = process.env) {
-  if (env.PUBLIC_MODE !== 'true' || typeof host !== 'string') return false;
-  const normalized = host.toLowerCase();
-  if (!dnsHost.test(normalized)) return false;
+  if (env.PUBLIC_MODE !== 'true') return false;
+  const normalized = publicAuthority(host);
+  if (!normalized) return false;
   const configured = [env.PUBLIC_HOST, ...String(env.PUBLIC_HOST_ALIASES || '').split(',')];
   return configured.some(value => {
-    const allowed = String(value || '').trim().toLowerCase();
-    return dnsHost.test(allowed) && normalized === allowed;
+    const allowed = publicAuthority(String(value || '').trim());
+    return normalized === allowed;
   });
 }
 

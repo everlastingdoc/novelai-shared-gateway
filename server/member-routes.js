@@ -6,7 +6,7 @@ const statusStreams = new Map();
 const error = (statusCode, message) => { throw Object.assign(new Error(message), { statusCode }); };
 const cookieName = 'nai_member_session';
 function cookie(req) { return String(req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith(cookieName + '='))?.slice(cookieName.length + 1) || ''; }
-function sameOrigin(req) {
+export function sameOrigin(req) {
   const host = String(req.headers.host || '');
   const origin = req.headers.origin;
   const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);

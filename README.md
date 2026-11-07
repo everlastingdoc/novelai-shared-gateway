@@ -16,7 +16,9 @@
 - 支持原生 MessagePack 最终图片流，兼容不会自动回退 ZIP 的客户端。
 - V5 恢复优先分给未满额成员；官方聚合余额变化不直接扣减闲置成员钱包。
 - 接受 JSON 和启动器的 multipart 请求；一次 1–4 张按独立单图依次排队、扣费与退款。
-- 不提供公开注册、兑换码、充值商城或旧图库管理。
+- 管理员图库按成员 Key 查看数量、实际文件占用和原图，支持日期筛选、单张/多选/按条件清理。
+- 图片默认统一保留 3 天；管理员可预览并修改天数，0 表示永久保留；生成及额度历史保留。
+- 不提供公开注册、兑换码、充值商城。
 
 ## 管理员分配与成员管理
 
@@ -26,7 +28,55 @@
 
 有排队、运行或额度预留时暂不能修改分配。保存校验配置版本，避免覆盖其他管理操作；预览后的余额仍可能因生成或恢复变化。删除转入或调低容量后，已有 V5 可暂时超过容量，超额期间不继续恢复。
 
-## Docker 部署
+## 直接运行（Node.js + systemd）
+
+需要 Node.js 22 或更新版本。复制 `.env.example` 为 `.env`，填写管理员密钥、NovelAI PST 和 HTTPS 入口；直接运行默认只监听 `127.0.0.1:18081`，数据保存在项目的 `data` 目录。管理员入口仍使用下方的 SSH 隧道。
+
+```sh
+npm ci --omit=dev
+cp .env.example .env
+chmod 600 .env
+# 编辑 .env 后，仅在全新数据目录执行一次：
+npm run bootstrap
+npm start
+```
+
+长期运行可使用 [deploy/nai-share.service](deploy/nai-share.service)。以下命令假定项目位于 `/opt/nai_share`，`/usr/bin/node` 为 Node.js 22+，且 `.env` 已填写：
+
+```sh
+sudo useradd --system --home-dir /opt/nai_share --shell /usr/sbin/nologin nai-share
+sudo install -d -o nai-share -g nai-share -m 700 /opt/nai_share/data
+sudo chown root:nai-share /opt/nai_share/.env
+sudo chmod 640 /opt/nai_share/.env
+# 只在全新数据目录初始化；已初始化的部署跳过此命令：
+sudo -u nai-share sh -c 'cd /opt/nai_share && /usr/bin/node --env-file=.env scripts/bootstrap.mjs'
+sudo install -m 644 deploy/nai-share.service /etc/systemd/system/nai-share.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now nai-share
+```
+
+如果已有 `data`，保留其中全部内容，并确保运行用户有读写权限；不要重新初始化。systemd 负责开机启动和异常重启，Caddy 后台仍指向 `127.0.0.1:18081`。
+
+系统 Node.js 较旧时，也可单独安装官方 Node.js 22 二进制，并通过 systemd drop-in 覆盖 `ExecStart` 的 Node 路径，无须替换其他服务使用的系统 Node。例如运行时位于 `/opt/nai-share-node22` 时：
+
+```ini
+# /etc/systemd/system/nai-share.service.d/runtime.conf
+[Service]
+ExecStart=
+ExecStart=/opt/nai-share-node22/bin/node --env-file=/opt/nai_share/.env /opt/nai_share/server/index.js
+```
+
+## 管理员图库
+
+管理员连接控制台后打开“图库与存储”。页面显示总数、文件实际占用、过期数量以及各 Key 的统计；缺失或不可读文件单列。图片统一存放于 `data/images`，成员归属按数据库中的原始 Key 区分；已删除成员的历史 Key 仍保留独立统计，页面只展示脱敏 Key。
+
+默认保留 3 天，从生成时间起计算。服务启动约一分钟后执行首次检查，此后每小时检查并分批清理。修改为 0 会停止自动清理。修改规则前展示按新天数计算的过期数量和占用，确认保存后按新规则执行。已有旧图片升级后也适用默认 3 天规则，如需保留，请在启动前将数据库设置 `galleryRetentionDays` 改为 0，或在首次检查前通过管理面板改为永久保留。
+
+图片每页最多 24 张，预览按需加载。可以单张、多选，或指定 Key / 日期 / 仅过期图片后批量清理；不提供无条件清空按钮。人工清理先创建有效期十分钟的固定目标预览，确认后分批执行，预览后新生成的图片不会被追加到该次清理。文件删除失败时保留图片记录并报告失败，可检查权限后重试；缺失文件允许清理残留索引。删除仅影响图片与任务中的图片引用，任务状态、参数和额度消费历史保留，不会退款。
+
+图库只管理 PNG、JPEG、WebP 成品文件，不包含 Vibe 的 `.bin` 编码文件、数据库、未登记文件及备份。旧的整站自动裁剪保护继续启用，图库按自己的保存规则清理。图库列表、统计、预览及清理接口只接受私有管理入口与管理员请求头；普通成员 Key 和登录 Cookie 都不能访问。成员图片内容接口同时校验图片归属，主动分发的短期签名链接仍按签名有效期取图。
+
+## Docker 部署（可选）
 
 需要 Linux Docker Compose。复制示例配置并生成随机管理员密钥：
 
@@ -40,7 +90,7 @@ chmod 700 data
 
 在 `.env` 中填写 `ADMIN_TOKEN`、自己的 `NOVELAI_TOKEN`（PST）和公网域名。管理员密钥至少 32 位，不能使用示例值。**不要把 .env 提交到 Git。**
 
-只在本机体验时，将 `PUBLIC_BASE_URL` 改为 `http://127.0.0.1:18081`；对外部署后填写自己的 HTTPS API 地址。成员配置页优先读取这个环境变量，避免数据库中的旧地址继续被复制给成员。备用域名可填入 `PUBLIC_HOST_ALIASES`，多个主机名用逗号分隔；每个域名仍需要自己的 HTTPS 反向代理配置，别名不会开放管理员入口。
+只在本机体验时，将 `PUBLIC_BASE_URL` 改为 `http://127.0.0.1:18081`；对外部署后填写自己的 HTTPS API 地址。成员配置页优先读取这个环境变量，避免数据库中的旧地址继续被复制给成员。备用域名可填入 `PUBLIC_HOST_ALIASES`，多个入口用逗号分隔；非标准端口须与主入口一样显式填写。每个入口仍需要自己的 HTTPS 反向代理配置，别名不会开放管理员入口。
 
 先初始化，再启动服务：
 
@@ -63,6 +113,15 @@ ssh -N -L 19080:127.0.0.1:18081 your-user@your-server
 ## 公网与客户端
 
 Compose 只绑定回环地址。使用 HTTPS 反向代理对外提供服务，参考 [Caddyfile.example](Caddyfile.example)，修改域名并保持与 `PUBLIC_HOST` 一致。管理员路由不能公开，代理不能把外部请求伪装成 localhost。不要记录 Authorization 或带 token 的完整 URL。
+
+如果 TCP 443 已被其他服务使用，可参考 [Caddyfile.8443.example](Caddyfile.8443.example) 使用 HTTPS 8443，并同步设置：
+
+```dotenv
+PUBLIC_HOST=gateway.example.com:8443
+PUBLIC_BASE_URL=https://gateway.example.com:8443
+```
+
+放行公网 TCP 80（HTTP-01 证书验证）与 TCP 8443（访问），后台 18081 保持只绑定回环地址。反向代理须保留原始 `Host` 和 `Origin` 中的端口；Caddy 对 HTTP 后台默认保留，不需要 `header_up Host`。白名单精确匹配已配置的域名与端口，不会允许同域名的任意端口，管理员仍经本机 SSH 隧道访问。
 
 - 成员门户：`https://your-domain/`
 - API Base：`https://your-domain`；已有 `/v1` 后缀也兼容。

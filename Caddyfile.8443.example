@@ -1,0 +1,19 @@
+# .env 对应设置：
+# PUBLIC_HOST=gateway.example.com:8443
+# PUBLIC_BASE_URL=https://gateway.example.com:8443
+# 将此站点加入现有 Caddy 配置；TCP 443 可继续由其他服务使用。
+# 证书使用 HTTP-01 验证，公网 TCP 80 须转发到此 Caddy，DNS 须指向服务器。
+gateway.example.com:8443 {
+	tls {
+		issuer acme {
+			disable_tlsalpn_challenge
+		}
+	}
+	@private path /admin* /api/admin* /api/health /memory
+	respond @private 404
+	reverse_proxy 127.0.0.1:18081 {
+		# 保留客户端 Host 和 Origin，包括 :8443；不要改写为 localhost。
+		flush_interval -1
+	}
+	# 不启用包含查询参数的访问日志；兼容 URL 可能携带调用 Key。
+}

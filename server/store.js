@@ -56,6 +56,7 @@ const defaultSettings = {
   serviceName: 'NovelAI Shared Gateway',
   costPerImage: 1,
   maxCacheImages: 500,
+  galleryRetentionDays: 3,
   accountConcurrency: 1,
   publicBaseUrl: '',
   mockWhenNoAccount: true,
@@ -421,6 +422,42 @@ export class JsonStore {
     const remaining = this.countRecords('images');
     runtimeLog(`SQLite image cache cleared ${removedIds.length} image record(s), affectedJobs=${jobUpdates.length}, totalBefore=${totalBefore}, remaining=${remaining}, duration=${Date.now() - startedAt}ms`);
     return { deleted: removedIds.length, remaining, images: removedImages };
+  }
+
+  // 调用方持有 update 队列；仅移除已完成文件清理的图片，历史任务与额度流水保留。
+  deleteGalleryImageRecords(ids, { source, bytes = 0, at = new Date().toISOString() }) {
+    this.flushPendingPersistSync();
+    const removedIds = uniqueStrings(ids);
+    if (!removedIds.length) return;
+    if (removedIds.length > 50) throw new Error('Gallery cleanup batch too large');
+    const placeholders = removedIds.map(() => '?').join(',');
+    const jobIds = this.sqlite.prepare(`SELECT id FROM jobs WHERE image_id IN (${placeholders})`).all(...removedIds).map(row => row.id);
+    const ledger = { id: createId('log'), type: 'image-cleanup', amount: removedIds.length, bytes, source, at, note: '清理本地图片；保留生成与额度历史' };
+    const order = Number(this.sqlite.prepare('SELECT MAX(order_value) AS value FROM ledger').get()?.value || 0) + 1;
+    const data = JSON.stringify(ledger);
+    this.sqlite.transaction(() => {
+      // 在 SQLite 内修改历史 JSON，避免把所有任务的参考图等大字段读进内存。
+      this.sqlite.prepare(`UPDATE jobs SET image_id = NULL, data = json_set(data, '$.imageId', '', '$.imageDeletedAt', ?)
+        WHERE image_id IN (${placeholders})`).run(at, ...removedIds);
+      this.sqlite.prepare(`DELETE FROM images WHERE id IN (${placeholders})`).run(...removedIds);
+      this.statements.upsertRecord.ledger.run(sqlRecord('ledger', ledger, order, data));
+    })();
+    const removed = new Set(removedIds);
+    this.db.images = this.db.images.filter(image => !removed.has(image.id));
+    for (const id of removedIds) { this.rowState.images.delete(id); this.orderKeys.images.delete(id); }
+    for (const id of jobIds) {
+      const job = this.db.jobs.find(item => item.id === id);
+      if (job) { job.imageId = ''; job.imageDeletedAt = at; }
+      if (this.rowState.jobs.has(id)) {
+        const row = this.statements.selectById.jobs.get(id);
+        this.rowState.jobs.set(id, { ...this.rowState.jobs.get(id), data: row.data });
+      }
+    }
+    this.db.ledger.unshift(ledger);
+    this.rowState.ledger.set(ledger.id, { data, order });
+    this.orderKeys.ledger.set(ledger.id, order);
+    this.refreshPartialCollectionState('images');
+    this.trimRuntimePartialCaches();
   }
 
   selectImagesForClear({ ids = [], query = '', clearAll = false } = {}) {

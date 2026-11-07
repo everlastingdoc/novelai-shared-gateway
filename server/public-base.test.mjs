@@ -20,12 +20,12 @@ test('成员取 Key 使用新的 API 入口，保留单个 v1 后缀且不改库
   const db = { settings: { publicBaseUrl: 'https://old.example' }, users: [user] };
   const cookie = createMemberSession(user);
   t.after(() => logoutMemberSession(cookie));
-  for (const base of ['https://nai.example', 'https://nai.example/', 'https://nai.example/v1']) {
+  for (const base of ['https://nai.example', 'https://nai.example/', 'https://nai.example/v1', 'https://nai.example:8443', 'https://nai.example:8443/v1']) {
     process.env.PUBLIC_BASE_URL = base;
     const res = response();
     await handleMemberRoutes({ method: 'GET', headers: { host: 'old.example', origin: 'https://old.example', cookie: `nai_member_session=${cookie}` } }, res, new URL('https://old.example/api/member/key'), { store: { update: fn => fn(db) } });
     assert.equal(res.status, 200);
-    assert.deepEqual(JSON.parse(res.body), { apiKey: 'synthetic-key', baseUrl: 'https://nai.example/v1' });
+    assert.deepEqual(JSON.parse(res.body), { apiKey: 'synthetic-key', baseUrl: `${new URL(base).origin}/v1` });
     assert.equal(db.settings.publicBaseUrl, 'https://old.example');
   }
 });
