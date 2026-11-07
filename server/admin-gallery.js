@@ -168,7 +168,7 @@ export class AdminGallery {
     const images = await Promise.all(rows.map(async row => {
       const image = JSON.parse(row.data);
       let file; try { file = await this.fileInfo(image); } catch { file = { bytes: 0, unreadable: true }; }
-      return { id: row.id, ...this.owner(image.token), createdAt: image.createdAt, prompt: image.fullPrompt || image.prompt || '', model: image.model,
+      return { id: row.id, filename: path.posix.basename(String(image.file || row.id).replaceAll('\\', '/')), ...this.owner(image.token), createdAt: image.createdAt, prompt: image.fullPrompt || image.prompt || '', model: image.model,
         width: image.width, height: image.height, steps: image.routedSteps ?? image.requestedSteps, cost: image.cost, mimeType: image.mimeType,
         bytes: file.bytes, missing: file.missing === true, unreadable: file.unreadable === true };
     }));

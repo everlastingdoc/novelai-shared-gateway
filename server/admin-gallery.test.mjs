@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { AdminGallery } from './admin-gallery.js';
 import { JsonStore } from './store.js';
+import { handleMemberRoutes } from './member-routes.js';
+import { setMemberCredentials } from './member-auth.js';
 
 // 隔离临时数据库与合成图片；不读取 .env，不连接真实上游。
 process.env.NO_AUTO_DELETE = 'true';
@@ -51,6 +53,8 @@ test('图库统计和分页覆盖完整 SQLite 历史，按原 Key 分组且不�
   const page = await gallery.page({ keyId: a.keyId });
   assert.equal(page.total, 28); assert.equal(page.images.length, 24); assert.ok(page.images.every(image => image.keyId === a.keyId));
   assert.ok(!JSON.stringify(page).includes(keyA)); assert.ok(!JSON.stringify(page).includes(dataDir));
+  assert.match(page.images[0].filename, /^img_test_\d+\.png$/);
+  assert.ok(page.images.every(image => !image.filename.includes('/') && !image.filename.includes('\\')));
   assert.equal((await gallery.page({ keyId: a.keyId, offset: 24 })).images.length, 4);
   assert.equal((await gallery.page({ from: new Date(NOW - 3 * DAY).toISOString(), before: new Date(NOW).toISOString() })).total, 27);
   for (const filters of [{ offset: -1 }, { offset: 0.1 }, { from: 'invalid' }, { keyId: "' OR 1=1--" }, { from: '2026-11-07', before: '2026-11-06' }]) await assert.rejects(gallery.page(filters), { statusCode: 400 });
@@ -148,12 +152,15 @@ test('文件清理后遇到数据库写入失败时，固定目标可重试并�
   assert.equal(await store.findImage(images[0].id), null);
 });
 
-test('图库 HTTP 列表、文件和写操作均校验私有 Host、管理员请求头和同源', async t => {
-  const { gallery } = await fixture(t, [{}]);
+test('图库 HTTP 列表、文件和写操作均校验私有 Host、管理员请求头和同源，真实成员会话无权访问', async t => {
+  const { gallery, store } = await fixture(t, [{}]);
+  await store.update(db => setMemberCredentials(db, 'a', { username: 'alpha', password: 'Synthetic-gallery-member-password' }), { collections: ['users'], immediate: true });
   const admin = 'synthetic-admin-only-fixture'.repeat(2);
+  const deps = { store, assertAdmin(req) { if (req.headers['x-admin-token'] !== admin) throw Object.assign(new Error('admin required'), { statusCode: 403 }); } };
   const server = http.createServer(async (req, res) => {
     try {
-      if (!await gallery.handle(req, res, new URL(req.url, 'http://localhost'), { assertAdmin(req) { if (req.headers['x-admin-token'] !== admin) throw Object.assign(new Error('admin required'), { statusCode: 403 }); } })) { res.writeHead(404); res.end(); }
+      const url = new URL(req.url, 'http://localhost');
+      if (!await handleMemberRoutes(req, res, url, deps) && !await gallery.handle(req, res, url, deps)) { res.writeHead(404); res.end(); }
     } catch (cause) { res.writeHead(cause.statusCode || 500); res.end(JSON.stringify({ error: cause.message })); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -161,18 +168,25 @@ test('图库 HTTP 列表、文件和写操作均校验私有 Host、管理员请
   const base = 'http://127.0.0.1:' + server.address().port;
   function call(pathname = '?view=summary', { headers = {}, body, method = body ? 'POST' : 'GET' } = {}) {
     return new Promise((resolve, reject) => {
-      const req = http.request(base + '/api/admin/gallery' + pathname, { method, headers: { origin: base, 'x-admin-token': admin, 'content-type': 'application/json', ...headers } }, res => {
+      const req = http.request(base + (pathname.startsWith('/api/') ? pathname : '/api/admin/gallery' + pathname), { method, headers: { origin: base, 'x-admin-token': admin, 'content-type': 'application/json', ...headers } }, res => {
         const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
       }); req.on('error', reject); req.end(body ? JSON.stringify(body) : undefined);
     });
   }
   assert.equal((await call()).status, 200);
-  for (const headers of [{ 'x-admin-token': '' }, { 'x-admin-token': '', authorization: `Bearer ${keyA}` }, { 'x-admin-token': '', cookie: 'nai_member_session=fake' }, { origin: 'https://evil.example' }, { 'sec-fetch-site': 'cross-site' }]) {
-    for (const pathname of ['?view=summary', '/images/img_test_0/content']) assert.equal((await call(pathname, { headers })).status, 403);
+  const login = await call('/api/member/login', { body: { username: 'alpha', password: 'Synthetic-gallery-member-password' }, headers: { 'x-admin-token': '' } });
+  assert.equal(login.status, 200);
+  const cookie = login.headers['set-cookie'][0].split(';')[0];
+  const memberHeaders = { 'x-admin-token': '', cookie, authorization: `Bearer ${keyA}` };
+  for (const headers of [{ 'x-admin-token': '' }, { 'x-admin-token': '', authorization: `Bearer ${keyA}` }, { 'x-admin-token': '', cookie: 'nai_member_session=fake' }, memberHeaders, { 'x-admin-token': keyA, cookie }, { origin: 'https://evil.example' }, { 'sec-fetch-site': 'cross-site' }]) {
+    for (const pathname of ['', '?view=summary', '/images/img_test_0/content']) assert.equal((await call(pathname, { headers })).status, 403);
   }
+  assert.equal((await call('/images/img_test_0/content', { method: 'HEAD', headers: memberHeaders })).status, 403);
+  for (const body of [{ action: 'preview-policy', retentionDays: 0 }, { action: 'preview-delete', mode: 'selected', ids: ['img_test_0'] }, { action: 'delete', planId: 'member-must-not-delete' }]) assert.equal((await call('', { headers: memberHeaders, body })).status, 403);
   assert.equal((await call('?adminToken=' + admin, { headers: { 'x-admin-token': '' } })).status, 403);
   assert.equal((await call('', { body: { action: 'preview-policy', retentionDays: 0 }, headers: { origin: '' } })).status, 403);
   assert.equal((await call('', { headers: { host: 'gateway.example:8443', origin: 'https://gateway.example:8443' } })).status, 404);
+  for (const pathname of ['', '?view=summary', '/images/img_test_0/content']) assert.equal((await call(pathname, { headers: { ...memberHeaders, host: 'gateway.example:8443', origin: 'https://gateway.example:8443' } })).status, 404);
   const content = await call('/images/img_test_0/content'); assert.equal(content.status, 200); assert.deepEqual(content.body, png); assert.equal(content.headers['cache-control'], 'no-store');
   assert.equal((await call('/images/img_test_0/content', { method: 'HEAD' })).body.length, 0);
   const preview = await call('', { body: { action: 'preview-policy', retentionDays: 0 } });

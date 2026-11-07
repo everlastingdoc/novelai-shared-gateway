@@ -6,9 +6,9 @@ function node(tag, text, cls) { const el = document.createElement(tag); if (text
 export function initGallery({ api, getToken, notice }) {
   const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet'; stylesheet.href = '/admin/gallery.css'; document.head.append(stylesheet);
   let visible = false, busy = false, offset = 0, total = 0, pending = null, confirming = false, epoch = 0;
-  let controller = new AbortController(), observer;
+  let imageController = null, imageTicket = 0;
   const selected = new Set(), urls = new Map();
-  let pageImages = [], previewQueue = [], activePreviews = 0;
+  let pageImages = [];
   const endpoint = '/api/admin/gallery';
   const act = body => api(endpoint, body);
   const filters = () => {
@@ -33,22 +33,22 @@ export function initGallery({ api, getToken, notice }) {
     try { await fn(); } catch (cause) { if (visible) notice(cause.message, true); }
     finally { busy = false; buttons(); }
   }
-  function releaseImages() {
-    epoch++; controller.abort(); controller = new AbortController(); observer?.disconnect(); previewQueue = [];
-    $('galleryImageDialog').close();
+  function clearImageView() {
+    imageTicket++; imageController?.abort(); imageController = null;
     $('galleryFullImage').removeAttribute('src');
+    $('galleryFullImage').hidden = true;
+    $('galleryDownload').removeAttribute('href'); $('galleryDownload').hidden = true;
+    $('galleryImageLoading').hidden = true; $('galleryImageRetry').hidden = true;
+    $('galleryPrompt').value = '';
+  }
+  function releaseImages() {
+    epoch++; clearImageView(); $('galleryImageDialog').close();
     for (const url of urls.values()) URL.revokeObjectURL(url);
     urls.clear();
   }
-  function pumpPreviews() {
-    while (previewQueue.length && activePreviews < 3) {
-      const job = previewQueue.shift(); activePreviews++;
-      job().catch(() => {}).finally(() => { activePreviews--; pumpPreviews(); });
-    }
-  }
-  async function imageUrl(image, ticket = epoch) {
+  async function imageUrl(image, ticket, signal) {
     if (urls.has(image.id)) return urls.get(image.id);
-    const response = await fetch(`${endpoint}/images/${encodeURIComponent(image.id)}/content`, { headers: { 'x-admin-token': getToken() }, signal: controller.signal, cache: 'no-store' });
+    const response = await fetch(`${endpoint}/images/${encodeURIComponent(image.id)}/content`, { headers: { 'x-admin-token': getToken() }, signal, cache: 'no-store' });
     if (!response.ok) throw new Error('图片已清理或暂时无法读取');
     const blob = await response.blob();
     if (ticket !== epoch || !visible) throw new Error('页面已切换');
@@ -58,46 +58,45 @@ export function initGallery({ api, getToken, notice }) {
     return urls.get(image.id);
   }
   async function showImage(image) {
-    const ticket = epoch;
+    clearImageView();
+    const ticket = epoch, view = imageTicket;
+    imageController = new AbortController();
+    const current = () => ticket === epoch && view === imageTicket && visible && $('galleryImageDialog').open;
+    $('galleryImageTitle').textContent = image.filename + ' · ' + image.name + ' · ' + image.maskedKey;
+    $('galleryImageInfo').textContent = `${time(image.createdAt)} · ${image.model || '未知模型'} · ${image.width}×${image.height} · ${image.steps ?? '—'} 步 · ${bytes(image.bytes)}`;
+    $('galleryPrompt').value = image.prompt || '未记录提示词';
+    $('galleryImageLoading').textContent = '正在加载图片…'; $('galleryImageLoading').hidden = false;
+    $('galleryImageRetry').onclick = () => showImage(image);
+    if (!$('galleryImageDialog').open) $('galleryImageDialog').showModal();
     try {
-      const url = await imageUrl(image, ticket);
-      if (ticket !== epoch) return;
-      $('galleryFullImage').src = url;
-      $('galleryImageTitle').textContent = image.name + ' · ' + image.maskedKey;
-      $('galleryImageInfo').textContent = `${time(image.createdAt)} · ${image.model || '未知模型'} · ${image.width}×${image.height} · ${image.steps ?? '—'} 步 · ${bytes(image.bytes)}`;
-      $('galleryPrompt').value = image.prompt || '未记录提示词';
-      $('galleryDownload').href = url; $('galleryDownload').download = image.id + (image.mimeType === 'image/jpeg' ? '.jpg' : image.mimeType === 'image/webp' ? '.webp' : '.png');
-      $('galleryImageDialog').showModal();
-    } catch (cause) { if (ticket === epoch) notice(cause.message, true); }
+      const url = await imageUrl(image, ticket, imageController.signal);
+      if (!current()) return;
+      $('galleryFullImage').src = url; $('galleryFullImage').hidden = false;
+      $('galleryDownload').href = url; $('galleryDownload').download = image.filename; $('galleryDownload').hidden = false;
+      $('galleryImageLoading').hidden = true;
+    } catch (cause) {
+      if (!current()) return;
+      $('galleryImageLoading').textContent = cause.message;
+      $('galleryImageRetry').hidden = false;
+    }
   }
   function renderPage(result) {
     releaseImages(); pageImages = result.images; selected.clear(); total = result.total;
     $('gallerySelectPage').checked = false;
     $('galleryGrid').replaceChildren();
-    const ticket = epoch;
-    observer = new IntersectionObserver(entries => {
-      for (const entry of entries) if (entry.isIntersecting) {
-        observer.unobserve(entry.target);
-        const button = entry.target, image = pageImages.find(item => item.id === button.dataset.id);
-        previewQueue.push(async () => {
-          if (ticket !== epoch) return;
-          try { const url = await imageUrl(image, ticket); if (ticket === epoch) { const img = node('img'); img.src = url; img.alt = image.name + ' 的生成图片'; button.replaceChildren(img); } }
-          catch { if (ticket === epoch) button.textContent = '图片无法读取'; }
-        });
-      }
-      pumpPreviews();
-    }, { rootMargin: '180px' });
     for (const image of pageImages) {
       const card = node('article', undefined, 'gallery-card');
-      const check = node('input'); check.type = 'checkbox'; check.setAttribute('aria-label', '选择 ' + image.id);
+      const check = node('input'); check.type = 'checkbox'; check.setAttribute('aria-label', '选择 ' + image.filename);
       check.onchange = () => { if (check.checked) selected.add(image.id); else selected.delete(image.id); $('gallerySelectPage').checked = selected.size === pageImages.length; buttons(); };
-      const label = node('label', image.name + ' · ' + image.maskedKey, 'gallery-card-label'); label.prepend(check);
-      const button = node('button', image.missing ? '文件已缺失' : image.unreadable ? '文件不可读取' : '加载预览…', 'gallery-image');
-      button.type = 'button'; button.dataset.id = image.id; button.setAttribute('aria-label', '查看 ' + image.id); button.disabled = image.missing || image.unreadable;
+      const label = node('label', undefined, 'gallery-card-select'); label.append(check);
+      const button = node('button', image.filename, 'gallery-image');
+      button.type = 'button'; button.dataset.id = image.id; button.setAttribute('aria-label', '查看 ' + image.filename); button.disabled = image.missing || image.unreadable;
       button.onclick = () => showImage(image);
-      card.append(label, button, node('p', time(image.createdAt), 'muted'), node('p', `${image.width}×${image.height} · ${image.steps ?? '—'} 步 · ${bytes(image.bytes)}`, 'muted'));
+      const details = node('div', undefined, 'gallery-card-details');
+      details.append(button, node('p', image.name + ' · ' + image.maskedKey + ' · ' + time(image.createdAt), 'muted'), node('p', `${image.width}×${image.height} · ${image.steps ?? '—'} 步 · ${bytes(image.bytes)}${image.missing ? ' · 文件已缺失' : image.unreadable ? ' · 文件不可读取' : ''}`, 'muted'));
+      card.append(label, details);
       const remove = node('button', '删除此图', 'secondary danger'); remove.type = 'button'; remove.onclick = () => run(() => previewDelete({ mode: 'selected', ids: [image.id] })); card.append(remove);
-      $('galleryGrid').append(card); if (!button.disabled) observer.observe(button);
+      $('galleryGrid').append(card);
     }
     if (!pageImages.length) $('galleryGrid').append(node('p', '当前条件下没有图片。', 'empty'));
     $('galleryPageInfo').textContent = total ? `${offset + 1}–${Math.min(offset + 24, total)} / ${total} 张` : '0 张';
@@ -184,6 +183,7 @@ export function initGallery({ api, getToken, notice }) {
   $('galleryConfirmCancel').onclick = () => { if (!confirming) $('galleryConfirmDialog').close(); };
   $('galleryConfirmDialog').addEventListener('close', () => { if (pending && !confirming) { const id = pending.planId; pending = null; act({ action: 'cancel', planId: id }).catch(() => {}); } });
   $('galleryImageClose').onclick = () => $('galleryImageDialog').close();
+  $('galleryImageDialog').addEventListener('close', clearImageView);
   $('galleryCopyPrompt').onclick = () => navigator.clipboard.writeText($('galleryPrompt').value).then(() => notice('提示词已复制。')).catch(() => notice('复制失败，请手动选择提示词复制。', true));
   buttons();
   return {
