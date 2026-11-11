@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import { sharedSurface } from './shared-surface.js';
+
+test('管理员页面引用的脚本和样式都能通过完整共享路由',()=>{
+  const html=readFileSync(new URL('../public/admin/members.html',import.meta.url),'utf8');
+  const assets=[...html.matchAll(/(?:src|href)="(\/[^"?#]+)(?:[?#][^"]*)?"/g)].map(m=>m[1]);
+  assert.ok(assets.includes('/admin/members.css'));
+  for(const path of assets){assert.equal(sharedSurface(path,'GET').allowed,true,path);assert.equal(sharedSurface(path,'HEAD').allowed,true,path);assert.equal(sharedSurface(path,'POST').allowed,false,path);}
+});
 
 test('首页只进入共享门户，旧静态资源与未知页面不可访问', () => {
   assert.deepEqual(sharedSurface('/'), { allowed: true, pathname: '/account.html' });

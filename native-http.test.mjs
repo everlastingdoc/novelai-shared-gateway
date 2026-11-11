@@ -124,6 +124,13 @@ test('独立公开发行版从初始化到真实 HTTP 返回、扣费、退款�
     assert.equal(response.status, 200); return (await response.json()).quota;
   };
 
+  await t.test('完整服务能加载新版管理页样式，公网 Host 仍不能访问',async()=>{
+    const page=await fetchLocal('/admin');assert.equal(page.status,200);assert.match(await page.text(),/\/admin\/members\.css/);
+    const css=await fetchLocal('/admin/members.css');assert.equal(css.status,200);assert.match(css.headers.get('content-type'),/text\/css/);assert.match(await css.text(),/\.member-table/);
+    const external=await new Promise((resolve,reject)=>{const req=http.get(new URL('/admin/members.css',baseUrl),{headers:{host:'gateway.example:8443'}},res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});req.on('error',reject);});
+    assert.equal(external,404);assert.equal(calls.length,0);
+  });
+
   await t.test('路径、鉴权与跨域校验在生图前完成，私有站点业务不存在', async () => {
     for (const pathname of ['/ai/generate-image-stream', '/v1/ai/generate-image-stream']) {
       assert.equal((await post(pathname, body(), 'invalid')).status, 401);
