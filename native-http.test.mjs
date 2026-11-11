@@ -288,6 +288,22 @@ test('独立公开发行版从初始化到真实 HTTP 返回、扣费、退款�
     assert.equal((await fetchLocal(jobData.imageUrl)).status, 404);
   });
 
+  let transferredRecipient;
+  await t.test('完整单车服务可转移当前 V5 和点数，超容量不修改份额且成员不能操作',async()=>{
+    const headers={'x-admin-token':adminToken,origin:baseUrl,'content-type':'application/json'};
+    const manage=async body=>{const r=await fetchLocal('/api/admin/member-management'+(body?'':'?model=single'),{method:body?'POST':'GET',headers,body:body?JSON.stringify(body):undefined});assert.equal(r.status,200);return r.json();};
+    const before=await manage(),from=before.users.find(u=>u.id===credentials[0].user_id),to=before.users.find(u=>u.id===credentials[1].user_id),generationCount=calls.length;
+    const move={action:'transfer-quota',fromUserId:from.id,toUserId:to.id,resource:'v5',amount:.5,expectedConfigVersion:before.configVersion};
+    const denied=await fetchLocal('/api/admin/member-management',{method:'POST',headers:{origin:baseUrl,'content-type':'application/json',authorization:'Bearer '+credentials[0].api_key,cookie:cookies[0]},body:JSON.stringify(move)});assert.equal(denied.status,403);
+    await manage(move);let after=await manage();
+    const destination=after.users.find(u=>u.id===to.id),source=after.users.find(u=>u.id===from.id);
+    near(destination.quota.v5Available,to.quota.v5Available+.5);near(source.quota.v5Available,from.quota.v5Available-.5);assert.ok(destination.quota.v5Available>destination.quota.v5Capacity);near(destination.quota.v5Capacity,to.quota.v5Capacity);near(destination.quota.share,to.quota.share);
+    near(after.users.reduce((n,u)=>n+u.quota.v5Available,0),before.users.reduce((n,u)=>n+u.quota.v5Available,0));
+    await manage({...move,resource:'anlasFixed',amount:1,expectedConfigVersion:after.configVersion});after=await manage();
+    transferredRecipient={id:to.id,quota:after.users.find(u=>u.id===to.id).quota};near(transferredRecipient.quota.anlasFixedAvailable,to.quota.anlasFixedAvailable+1);
+    assert.equal(calls.length,generationCount);
+  });
+
   await stop();
   const persisted = new JsonStore(dataDir);
   await persisted.init();
@@ -299,5 +315,7 @@ test('独立公开发行版从初始化到真实 HTTP 返回、扣费、退款�
     assert.ok(reservations.some(charge => charge.status === 'refunded'));
     assert.ok(reservations.every(charge => charge.status !== 'reserved'));
     assert.ok(snapshot.jobs.every(job => ['done', 'failed'].includes(job.status)));
+    assert.equal(snapshot.settings.fairQuota.allocationModel,'single_pool');
+    const received=snapshot.settings.fairQuota.balances[transferredRecipient.id];near(received.v5Available,transferredRecipient.quota.v5Available);near(received.anlasFixedAvailable,transferredRecipient.quota.anlasFixedAvailable);near(snapshot.settings.fairQuota.shares[transferredRecipient.id],transferredRecipient.quota.share);
   } finally { await persisted.close(); }
 });

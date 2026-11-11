@@ -1,17 +1,58 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {configureFairQuota,configureFairGroups,syncFairQuota,fairQuotaSummary,reserveFairQuota,settleFairQuota,initializeSubscriptionCycle} from './fair-quota.js';
+import {configureFairQuota,configureFairGroups,syncFairQuota,fairQuotaSummary,reserveFairQuota,settleFairQuota,initializeSubscriptionCycle,manageFairMember} from './fair-quota.js';
 import {migrateSinglePool,configureSinglePool,joinSinglePool,removeSinglePoolMember,splitQuota} from './single-pool.js';
 const NOW=1800000000000,DAY=86400000;
 const request={model:'nai-diffusion-5-full',width:1024,height:1024,steps:23};
 const sum=(db,field)=>Object.values(db.settings.fairQuota.balances).reduce((n,b)=>n+b[field],0);
 const close=(a,b)=>assert.ok(Math.abs(a-b)<1e-8,`${a} != ${b}`);
-function fixture(){
-  const db={users:['a','b','c','d'].map(id=>({id,token:'NAI-'+id,enabled:true})),settings:{},jobs:[],accounts:[{id:'opus',enabled:true,subscriptionActive:true,subscriptionExpiresAt:NOW+DAY,quotaTier:3,quotaFixed:10000,quotaPurchased:1000,v5UsagePercent:60,v5UsageTimeUntilNextPercent:0,quotaCheckedAt:NOW}]};
+function fixture(percent=60){
+  const db={users:['a','b','c','d'].map(id=>({id,token:'NAI-'+id,enabled:true})),settings:{},jobs:[],accounts:[{id:'opus',enabled:true,subscriptionActive:true,subscriptionExpiresAt:NOW+DAY,quotaTier:3,quotaFixed:10000,quotaPurchased:1000,v5UsagePercent:percent,v5UsageTimeUntilNextPercent:0,quotaCheckedAt:NOW}]};
   configureFairQuota(db,db.users.map(u=>u.id));syncFairQuota(db,NOW);return db;
 }
 function incoming(db,at,changes={}){Object.assign(db.accounts[0],changes,{quotaCheckedAt:at});return syncFairQuota(db,at);}
 function allocate(db,shareMode='equal',shares,now=NOW){return configureSinglePool(db,{shareMode,shares,expectedConfigVersion:db.settings.fairQuota.configVersion},now);}
+function transfer(db,resource,amount,changes={},now=NOW){return manageFairMember(db,{action:'transfer-quota',fromUserId:'a',toUserId:'b',resource,amount,expectedConfigVersion:db.settings.fairQuota.configVersion,...changes},now);}
+test('单车 V5 转入可超过容量，份额、容量、周期和其他钱包不变，重启与失败退款不裁剪',()=>{
+  let db=fixture();migrateSinglePool(db,NOW);const before=structuredClone(db),original=structuredClone(db.settings.fairQuota);
+  transfer(db,'v5',15);let s=db.settings.fairQuota;
+  assert.deepEqual(s.shares,original.shares);assert.equal(s.shareMode,original.shareMode);assert.deepEqual(s.subscriptionCycle,original.subscriptionCycle);assert.deepEqual(db.users,before.users);
+  close(s.balances.a.v5Available,0);close(s.balances.b.v5Available,30);close(sum(db,'v5Available'),60);
+  for(const id of ['c','d'])assert.deepEqual(s.balances[id],original.balances[id]);
+  close(sum(db,'anlasFixedAvailable'),10000);close(sum(db,'anlasPurchasedAvailable'),1000);
+  let q=fairQuotaSummary(db,db.users[1],NOW);close(q.v5Capacity,25);close(q.v5Available,30);close(q.share,.25);close(q.v5RefillPerDay,0);
+  assert.equal(s.configurationHistory.at(-1).transferred.v5,15);assert.deepEqual(s.configurationHistory.at(-1).shares,original.shares);
+  db=structuredClone(db);incoming(db,NOW+1);s=db.settings.fairQuota;close(s.balances.b.v5Available,30);
+  const job={id:'transferred-quota-job',request};reserveFairQuota(db,db.users[1],job,db.accounts[0],NOW+1);assert.ok(s.balances.b.v5Available<30);settleFairQuota(db,job,false,NOW+2);settleFairQuota(db,job,false,NOW+3);close(s.balances.b.v5Available,30);
+});
+test('超容量转入不参与恢复，真实生图消耗到容量以下后按原份额恢复',()=>{
+  const db=fixture(80);migrateSinglePool(db,NOW);transfer(db,'v5',10);incoming(db,NOW+1,{v5UsageTimeUntilNextPercent:600});syncFairQuota(db,NOW+300001);
+  close(db.settings.fairQuota.balances.b.v5Available,30);close(sum(db,'v5Available'),80.5);
+  let consumed=0,count=0;
+  while(db.settings.fairQuota.balances.b.v5Available>=25){const job={id:'use-transferred-'+count++,request};const charge=reserveFairQuota(db,db.users[1],job,db.accounts[0],NOW+300001);assert.equal(charge.resource,'v5');settleFairQuota(db,job,true,NOW+300001);consumed+=charge.amount;assert.ok(count<1000);}
+  const b=db.settings.fairQuota.balances.b.v5Available,all=sum(db,'v5Available');incoming(db,NOW+300002,{v5UsagePercent:80.5-consumed});syncFairQuota(db,NOW+360002);
+  assert.ok(db.settings.fairQuota.balances.b.v5Available>b);assert.ok(db.settings.fairQuota.balances.b.v5Available<=25+1e-9);close(sum(db,'v5Available'),all+.1);close(fairQuotaSummary(db,db.users[1],NOW+360002).v5Capacity,25);
+});
+test('订阅和购买点数只在指定钱包转移，非法请求/余额不足/活动任务/过时版本原子拒绝',()=>{
+  const db=fixture();migrateSinglePool(db,NOW);db.users[0].enabled=false;
+  const shares=structuredClone(db.settings.fairQuota.shares);transfer(db,'anlasFixed',123);transfer(db,'anlasPurchased',17);
+  close(db.settings.fairQuota.balances.a.anlasFixedAvailable,2377);close(db.settings.fairQuota.balances.b.anlasFixedAvailable,2623);close(db.settings.fairQuota.balances.a.anlasPurchasedAvailable,233);close(db.settings.fairQuota.balances.b.anlasPurchasedAvailable,267);close(sum(db,'anlasFixedAvailable'),10000);close(sum(db,'anlasPurchasedAvailable'),1000);assert.deepEqual(db.settings.fairQuota.shares,shares);
+  let before=structuredClone(db);
+  for(const change of [{amount:2378},{toUserId:'a'},{toUserId:'missing'},{resource:'anlasFixed',amount:.5},{resource:'invalid'},{amount:NaN},{amount:0},{expectedConfigVersion:0},{resource:'v5',amount:16}]){assert.throws(()=>transfer(db,'anlasFixed',1,change));assert.deepEqual(db,before);}
+  db.jobs.push({id:'busy',status:'queued'});before=structuredClone(db);assert.throws(()=>transfer(db,'v5',1));assert.deepEqual(db,before);db.jobs[0].status='done';db.settings.fairQuota.reservations.pending={status:'reserved',resource:'free',amount:0,userId:'a'};before=structuredClone(db);assert.throws(()=>transfer(db,'v5',1));assert.deepEqual(db,before);
+});
+test('零份额成员可使用管理员转入的 V5，但不会获得容量或恢复份额',()=>{
+  const db=fixture();migrateSinglePool(db,NOW);allocate(db,'custom',{a:1,b:0,c:0,d:0});transfer(db,'v5',10);
+  const q=fairQuotaSummary(db,db.users[1],NOW);close(q.v5Available,10);close(q.v5Capacity,0);close(q.v5RefillPerDay,0);close(q.share,0);const job={id:'zero-share-use',request};assert.equal(reserveFairQuota(db,db.users[1],job,db.accounts[0],NOW).resource,'v5');settleFairQuota(db,job,false,NOW+1);close(db.settings.fairQuota.balances.b.v5Available,10);
+});
+test('全部转出以保存时的最新余额为准，不留下显示精度尾差，点数保留不足整点部分',()=>{
+  const db=fixture();migrateSinglePool(db,NOW);incoming(db,NOW+1,{v5UsageTimeUntilNextPercent:600});
+  const before=sum(db,'v5Available'),version=db.settings.fairQuota.configVersion;
+  const result=transfer(db,'v5',0,{allAvailable:true,expectedConfigVersion:version},NOW+300001);
+  close(db.settings.fairQuota.balances.a.v5Available,0);assert.ok(result.transferred.v5>15);close(sum(db,'v5Available'),before+.5);
+  db.settings.fairQuota.balances.a.anlasFixedAvailable=12.75;const points=transfer(db,'anlasFixed',0,{allAvailable:true},NOW+300001);close(points.transferred.anlasFixed,12);close(db.settings.fairQuota.balances.a.anlasFixedAvailable,.75);
+  const saved=structuredClone(db);assert.throws(()=>transfer(db,'v5',1,{allAvailable:'true'},NOW+300001));assert.deepEqual(db,saved);
+});
 test('旧多组迁移保留所有钱包、V5 容量、凭据和历史，不维护两套份额',()=>{
   const db=fixture();configureFairGroups(db,db.users.map((u,i)=>({id:'g'+i,members:[u.id],share:[.4,.3,.2,.1][i]})),{now:NOW});
   const before=structuredClone(db),caps=db.users.map(u=>fairQuotaSummary(db,u,NOW).v5Capacity);

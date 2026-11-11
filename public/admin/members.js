@@ -1,7 +1,7 @@
 import { initGallery } from './gallery.js';
 const $=id=>document.getElementById(id);
 const gallery=initGallery({api,getToken:()=>$('adminToken').value,notice});
-let state=null,upstream=null,publicBase='',busy=false,editing=false,shares={},shareMode='equal',selectedMember=null,confirmTask=null,noticeTimer;
+let state=null,upstream=null,publicBase='',busy=false,editing=false,shares={},shareMode='equal',selectedMember=null,confirmTask=null,noticeTimer,transferEntireBalance=false;
 const number=value=>value===null||value===undefined?'—':Number(value).toLocaleString('zh-CN',{maximumFractionDigits:3});
 const percent=value=>number(Number(value||0)*100)+'%';
 const time=value=>value?new Date(value).toLocaleString('zh-CN'):'尚未同步';
@@ -22,6 +22,8 @@ function updateButtons(){
   for(const id of ['newMember','editShares'])$(id).disabled=unavailable||editing;
   for(const id of ['saveMember','equalize','cancelShares','confirmAction','refresh','refreshUpstream','toggleUpstream','saveUpstreamPst','syncPeriod'])$(id).disabled=busy||(!!state&&['refreshUpstream','toggleUpstream','saveUpstreamPst'].includes(id)&&!upstream);
   $('saveShares').disabled=busy||!validShares();
+  $('confirmTransfer').disabled=busy||!validTransfer();
+  $('transferAll').disabled=busy||!(transferMaximum()>0);
   document.querySelectorAll('[data-member-manage]').forEach(el=>el.disabled=busy||editing||state?.migrationPending);
 }
 function run(fn){return async event=>{event?.preventDefault();if(busy)return;busy=true;updateButtons();notice('');try{await fn(event);}catch(e){notice(e.message,true);}finally{busy=false;updateButtons();}};}
@@ -71,6 +73,7 @@ function renderMembers(){
     if(editing){const input=node('input');input.type='number';input.min='0';input.max='100';input.step='any';input.className='member-share-input';input.value=Number(((shares[u.id]||0)*100).toFixed(6));input.setAttribute('aria-label',memberName(u)+' 的份额百分比');input.oninput=()=>{shares[u.id]=input.value===''?NaN:Number(input.value)/100;shareMode='custom';shareSummary();};shareCell.append(input,document.createTextNode('%'));}else shareCell.textContent=percent(q.share);
     const v5=node('td');v5.append(node('span',number(q.v5Available)+'% / '+number(q.v5Capacity)+'%','cell-value'));
     const bar=node('progress',undefined,'v5-bar');bar.max=Math.max(q.v5Capacity||0,1e-9);bar.value=q.v5Available||0;bar.setAttribute('aria-label',memberName(u)+' 的 V5 余量');v5.append(bar);
+    if(q.v5Available>q.v5Capacity+1e-9)v5.append(node('span','含转入额度，暂不恢复','cell-sub'));
     const points=node('td');points.append(node('span',number(q.anlasFixedAvailable),'cell-value'));if(q.anlasPurchasedAvailable>0)points.append(node('span','购买 '+number(q.anlasPurchasedAvailable),'cell-sub'));
     if(editing){const a=node('span',undefined,'after-value'),b=node('span',undefined,'after-value');a.id='preview-v5-'+u.id;b.id='preview-points-'+u.id;v5.append(a);points.append(b);}
     const actions=node('td'),button=node('button','管理','secondary');button.dataset.memberManage=u.id;button.onclick=run(()=>openManage(u));actions.append(button);row.append(name,shareCell,v5,points,actions);$('members').append(row);
@@ -102,7 +105,23 @@ async function delivery(user,password){
   const key=await manage({action:'member-key',userId:user.id}),portal=String(state.publicBaseUrl||publicBase||location.origin).replace(/\/+$/,'');$('deliveryText').value=['成员入口：'+portal+'/','用户名：'+user.username,'密码：'+(password||'使用原密码，忘记请联系管理员重置'),'API Base：'+portal+'/v1','API Key：'+key.apiKey].join('\n');modal('deliveryDialog');
 }
 function openManage(user){
-  selectedMember=user;const q=user.quota||{};$('manageName').textContent=memberName(user);$('manageQuota').textContent='份额 '+percent(q.share)+' · V5 '+number(q.v5Available)+'% / '+number(q.v5Capacity)+'% · 订阅点数 '+number(q.anlasFixedAvailable);$('managePurchased').hidden=!(q.anlasPurchasedAvailable>0);$('managePurchased').textContent='购买点数 '+number(q.anlasPurchasedAvailable);$('toggleMember').textContent=user.enabled?'停用成员':'恢复成员';$('resetPassword').disabled=!user.enabled;$('removeMember').disabled=state.users.length<=1;modal('manageDialog');
+  selectedMember=user;const q=user.quota||{};$('manageName').textContent=memberName(user);$('manageQuota').textContent='份额 '+percent(q.share)+' · V5 '+number(q.v5Available)+'% / '+number(q.v5Capacity)+'% · 订阅点数 '+number(q.anlasFixedAvailable);$('managePurchased').hidden=!(q.anlasPurchasedAvailable>0);$('managePurchased').textContent='购买点数 '+number(q.anlasPurchasedAvailable);$('toggleMember').textContent=user.enabled?'停用成员':'恢复成员';$('resetPassword').disabled=!user.enabled;$('removeMember').disabled=state.users.length<=1;$('transferMember').disabled=state.users.length<=1;modal('manageDialog');
+}
+const transferNames={v5:'V5 余量',anlasFixed:'订阅点数',anlasPurchased:'购买点数'};
+function transferParties(){return {from:state?.users.find(u=>u.id===$('transferFrom').value),to:state?.users.find(u=>u.id===$('transferTo').value),resource:$('transferResource').value,amount:transferEntireBalance?transferMaximum():Number($('transferAmount').value)};}
+function transferMaximum(){const from=state?.users.find(u=>u.id===$('transferFrom').value),resource=$('transferResource').value,balance=from?.quota?.[resource+'Available']||0;return resource==='v5'?balance:Math.floor(balance);}
+function validTransfer(){const {from,to,resource,amount}=transferParties();return Boolean(from&&to&&from.id!==to.id&&Number.isFinite(amount)&&amount>0&&amount<=transferMaximum()&&(resource==='v5'||Number.isInteger(amount)));}
+function transferHint(){
+  const {from,to,resource,amount}=transferParties(),v5=resource==='v5',maximum=transferMaximum(),unit=v5?'%':' 点',value=Number.isFinite(amount)&&amount>=0?amount:0;
+  const source=from?.quota?.[resource+'Available']||0,target=to?.quota?.[resource+'Available']||0;
+  $('transferAmountLabel').textContent=v5?'转移数量（V5 百分点）':'转移数量（整数点数）';$('transferAmount').min=v5?'0.000001':'1';$('transferAmount').step=v5?'any':'1';$('transferAmount').max=String(maximum);
+  $('transferHint').textContent=from&&to?memberName(from)+'：'+number(source)+unit+' → '+number(source-value)+unit+'；'+memberName(to)+'：'+number(target)+unit+' → '+number(target+value)+unit+'。'+(v5?'双方 V5 容量不变。'+(target+value>(to.quota?.v5Capacity||0)+1e-9?'接收方超过容量期间暂停恢复，用到低于容量后继续恢复。':''):''):'';
+  $('transferError').hidden=true;updateButtons();
+}
+function openTransfer(){
+  requireSaved();const user=selectedMember;if(!user)return;const recipients=state.users.filter(u=>u.id!==user.id&&u.quota?.member);if(!recipients.length)throw new Error('至少需要两位成员才能转移额度。');
+  $('manageDialog').close();$('transferFrom').value=user.id;$('transferFromName').textContent=memberName(user);$('transferTo').replaceChildren(...recipients.map(u=>{const option=node('option',memberName(u)+(u.enabled?'':'（已停用）'));option.value=u.id;return option;}));
+  transferEntireBalance=false;$('transferResource').value='v5';$('transferResource').querySelector('option[value="anlasPurchased"]').hidden=!state.users.some(u=>u.quota?.anlasPurchasedAvailable>0);$('transferAmount').value='';transferHint();modal('transferDialog');
 }
 function confirmation(title,description,task){$('confirmTitle').textContent=title;$('confirmDescription').textContent=description;confirmTask=task;modal('confirmDialog');}
 async function refreshOfficial(){if(!upstream)throw new Error('尚未绑定官方账号');const result=await api('/api/admin/accounts/quota',{ids:[upstream.id]});if(result.failed)throw new Error('官方查询失败，请检查账号凭据。');}
@@ -123,6 +142,19 @@ $('credentials').onsubmit=run(async()=>{
   try{await delivery({id:created.id,username:created.username},created.password||password);}catch{notice('账户已保存，分发信息读取失败。请从成员管理重新打开；未保存的密码可重置。',true);}
 });
 $('memberDialog').addEventListener('close',()=>{$('password').value='';});$('deliveryDialog').addEventListener('close',()=>{$('deliveryText').value='';});
+$('transferMember').onclick=run(openTransfer);
+for(const id of ['transferTo','transferResource'])$(id).onchange=()=>{if(id==='transferResource'){transferEntireBalance=false;$('transferAmount').value='';}transferHint();};
+$('transferAmount').oninput=()=>{transferEntireBalance=false;transferHint();};
+$('transferAll').onclick=()=>{if(busy)return;transferEntireBalance=true;$('transferAmount').value=String(Math.floor(transferMaximum()*1e6)/1e6);transferHint();};
+$('transferForm').onsubmit=async event=>{
+  event.preventDefault();if(busy)return;busy=true;updateButtons();$('transferError').hidden=true;
+  try{
+    if(!validTransfer())throw new Error('请填写有效数量，不能超过转出成员的当前余额。');
+    const {from,to,resource,amount}=transferParties();await manage({action:'transfer-quota',fromUserId:from.id,toUserId:to.id,resource,amount,allAvailable:transferEntireBalance,expectedConfigVersion:state.configVersion});$('transferDialog').close();selectedMember=null;
+    try{await refresh();notice(transferNames[resource]+' 已转移，份额与 V5 容量保持不变。');}catch{notice('转移已完成，请刷新查看最新余额，勿重复提交。',true);}
+  }catch(e){$('transferError').textContent=e.message.includes('预留额度的任务')?'还有请求在处理，完成后即可转移。':e.message;$('transferError').hidden=false;}
+  finally{busy=false;updateButtons();}
+};
 $('copyDelivery').onclick=run(async()=>{await navigator.clipboard.writeText($('deliveryText').value);notice('已复制该成员的登录信息和个人 Key。');});$('deliverMember').onclick=run(async()=>{if(selectedMember){$('manageDialog').close();await delivery(selectedMember);}});$('resetPassword').onclick=run(()=>{if(selectedMember)editMember(selectedMember);});
 $('toggleMember').onclick=run(()=>{const user=selectedMember;if(!user)return;$('manageDialog').close();confirmation((user.enabled?'停用 ':'恢复 ')+memberName(user),user.enabled?'暂停登录和新的生图请求。原个人 Key、份额和余额保留。':'恢复原个人 Key 和登录，继续使用保留的余额。',async()=>{await manage({action:'member-status',userId:user.id,enabled:!user.enabled});$('confirmDialog').close();await refresh();notice('成员状态已更新。');});});
 $('removeMember').onclick=run(()=>{const user=selectedMember;if(!user)return;const q=user.quota||{};$('manageDialog').close();confirmation('删除 '+memberName(user)+'？','登录和个人 Key 会立即失效，历史记录保留。剩余 V5 '+number(q.v5Available)+'% 和订阅点数 '+number(q.anlasFixedAvailable)+(q.anlasPurchasedAvailable>0?'、购买点数 '+number(q.anlasPurchasedAvailable):'')+' 将按其余成员的份额分配。',async()=>{await manage({action:'remove-member',userId:user.id,expectedConfigVersion:state.configVersion});$('confirmDialog').close();selectedMember=null;try{await refresh();notice('成员已删除，剩余额度已分配给其他成员。');}catch{notice('成员已删除，请刷新查看最新名单。',true);}});});

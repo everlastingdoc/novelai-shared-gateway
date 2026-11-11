@@ -133,14 +133,19 @@ export function manageFairMember(db, body, now=Date.now()) {
   let autoJoined=null,shareChanges=[];
   const transferred={v5:0,anlasFixed:0,anlasPurchased:0};
   if(body.action==='transfer-quota') {
-    if(!s.balances[target.id])fail('转账接收成员必须已加入共享分组',400);
-    if(!s.balances[source.id])fail('转出成员未加入共享分组',400);
-    if(!Object.hasOwn(transferred,body.resource)||typeof body.amount!=='number'||!Number.isFinite(body.amount)||body.amount<=0)fail('转账资源或数量无效',400);
-    if(body.resource!=='v5'&&!Number.isInteger(body.amount))fail('Anlas 转账数量必须为整数',400);
+    if(!s.balances[target.id])fail('接收成员尚未分配额度',400);
+    if(!s.balances[source.id])fail('转出成员尚未分配额度',400);
+    if(!Object.hasOwn(transferred,body.resource))fail('转账资源无效',400);
+    if(body.allAvailable!==undefined&&typeof body.allAvailable!=='boolean')fail('allAvailable 必须是布尔值',400);
     const field=body.resource+'Available';
-    if(s.balances[source.id][field]+1e-9<body.amount)fail('转出成员余额不足',409);
-    if(body.resource==='v5'&&s.balances[target.id][field]+body.amount>100*weight(s,target.id)+1e-9)fail('接收成员 V5 超出容量，请先增加其份额或减少转账量',409);
-    s.balances[source.id][field]-=body.amount;s.balances[target.id][field]+=body.amount;transferred[body.resource]=body.amount;
+    const amount=body.allAvailable===true?(body.resource==='v5'?s.balances[source.id][field]:Math.floor(s.balances[source.id][field])):body.amount;
+    if(typeof amount!=='number'||!Number.isFinite(amount)||amount<=0)fail('转账数量无效或当前没有可转余额',400);
+    if(body.resource!=='v5'&&!Number.isInteger(amount))fail('Anlas 转账数量必须为整数',400);
+    if(s.balances[source.id][field]+1e-9<amount)fail('转出成员余额不足',409);
+    // 单车转移的是当前钱包余额，不修改份额或恢复容量。转入可暂时超过容量；
+    // 恢复只给低于容量的钱包，超额部分不会恢复、剪裁或重复计入公共额度。
+    if(body.resource==='v5'&&s.allocationModel!=='single_pool'&&s.balances[target.id][field]+amount>100*weight(s,target.id)+1e-9)fail('接收成员 V5 超出容量，请先增加其份额或减少转账量',409);
+    s.balances[source.id][field]-=amount;s.balances[target.id][field]+=amount;transferred[body.resource]=amount;
   } else {
     const originalShares=Object.fromEntries(s.members.map(id=>[id,weight(s,id)]));
     const originalGroup=groupFor(s,source.id);
@@ -171,7 +176,7 @@ export function manageFairMember(db, body, now=Date.now()) {
     draft.users=draft.users.filter(u=>u.id!==source.id);
   }
   totals(s);s.configVersion+=1;
-  s.configurationHistory.push({at:now,actorId:'administrator',action:body.action==='transfer-quota'?'transfer-quota':'delete-member',version:s.configVersion,sourceId,targetId,transferred,autoJoined,shareChanges,before,after:structuredClone(s.groups),beforeBalances,afterBalances:structuredClone(s.balances)});
+  s.configurationHistory.push({at:now,actorId:'administrator',action:body.action==='transfer-quota'?'transfer-quota':'delete-member',version:s.configVersion,sourceId,targetId,transferred,autoJoined,shareChanges,before,after:structuredClone(s.groups),...(s.allocationModel==='single_pool'?{shares:structuredClone(s.shares),shareMode:s.shareMode}:{}),beforeBalances,afterBalances:structuredClone(s.balances)});
   s.configurationHistory=s.configurationHistory.slice(-1000);
   const result={configVersion:s.configVersion,groups:s.groups,transferred,autoJoined,shareChanges,users:draft.users.map(user=>({id:user.id,quota:fairQuotaSummary(draft,user,now)})),...(body.action==='transfer-quota'?{fromUserId:sourceId,toUserId:targetId}:{deletedUserId:sourceId,transferToUserId:targetId})};
   if(body.action==='preview-delete-member')result.configVersion=body.expectedConfigVersion;

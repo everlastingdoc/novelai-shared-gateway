@@ -16,11 +16,15 @@ test('单车管理员流程：创建即分配V5和点数、原子失败、份额
   async function call(path,body,headers={}){const r=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{Origin:base,'content-type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,headers:r.headers,data:await r.json()};}
   const admin=body=>call('/api/admin/member-management',body,{'x-admin-token':'synthetic-admin'});
   let result=await call('/api/member/login',{username:'member-a',password:'synthetic-test-password-a'});const cookie=result.headers.get('set-cookie').split(';')[0];
-  for(const action of ['allocation','create-member','remove-member','sync-period']){
+  for(const action of ['allocation','create-member','remove-member','sync-period','transfer-quota']){
     const before=structuredClone(db);result=await call('/api/admin/member-management',{action,username:'bad-member'},{cookie,authorization:'Bearer NAI-a'});assert.equal(result.status,403);assert.deepEqual(db,before);
   }
   result=await call('/api/admin/member-management?model=single',undefined,{'x-admin-token':'synthetic-admin'});assert.equal(result.status,200);assert.equal(result.data.allocationModel,'single_pool');assert.equal(result.data.shareMode,'equal');
   assert.ok(!JSON.stringify(result.data).includes('pst-SYNTHETIC'));assert.ok(!JSON.stringify(result.data).includes('NAI-a'));assert.ok(!JSON.stringify(result.data).includes('memberAuth'));
+  const move={action:'transfer-quota',fromUserId:'a',toUserId:'b',resource:'v5',amount:15,expectedConfigVersion:result.data.configVersion};result=await admin(move);assert.equal(result.status,200);assert.equal(db.settings.fairQuota.balances.b.v5Available,30);assert.equal(result.data.users.find(u=>u.id==='b').quota.v5Capacity,25);assert.equal(result.data.users.find(u=>u.id==='b').quota.share,.25);
+  let afterMove=structuredClone(db);result=await admin(move);assert.equal(result.status,409);assert.deepEqual(db,afterMove);
+  result=await admin({...move,fromUserId:'b',toUserId:'a',expectedConfigVersion:db.settings.fairQuota.configVersion});assert.equal(result.status,200);assert.equal(db.settings.fairQuota.balances.a.v5Available,15);assert.equal(db.settings.fairQuota.balances.b.v5Available,15);
+  result=await call('/api/admin/member-management?model=single',undefined,{'x-admin-token':'synthetic-admin'});
   const version=result.data.configVersion,originalUsers=structuredClone(db.users);let before=structuredClone(db);
   result=await admin({action:'create-member',username:'member-e',password:'short',expectedConfigVersion:version});assert.equal(result.status,400);assert.deepEqual(db,before);
   result=await admin({action:'create-member',username:'member-e',expectedConfigVersion:version-1});assert.equal(result.status,409);assert.deepEqual(db,before);
