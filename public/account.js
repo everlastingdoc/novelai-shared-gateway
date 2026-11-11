@@ -1,6 +1,6 @@
 import { startSharedStatus, stopSharedStatus } from '/shared-status.js';
 const $ = id => document.getElementById(id);
-const stateNames = { pending_opus:'等待管理员接入有效 Opus', inactive_opus:'订阅暂不可用', stale:'官方余额等待刷新', unknown_balance:'官方余额未知', ambiguous_opus:'等待管理员选择上游', active:'额度已同步' };
+const stateNames = { pending_opus:'等待管理员接入有效 Opus', inactive_opus:'订阅暂不可用', stale:'官方余额等待刷新', unknown_balance:'官方余额未知', ambiguous_opus:'等待管理员选择上游', renewal_pending:'正在确认订阅续期，请稍后重试', active:'额度已同步' };
 async function api(path, body) {
   const r = await fetch('/api/member/' + path, { method: body === undefined ? 'GET' : 'POST', credentials:'same-origin', headers:body === undefined ? {} : {'Content-Type':'application/json'}, body:body === undefined ? undefined : JSON.stringify(body) });
   const data = await r.json();
@@ -11,7 +11,7 @@ const number = n => Number(n || 0).toLocaleString('zh-CN', {maximumFractionDigit
 async function load() {
   const data = await api('me'), q=data.quota; startSharedStatus();
   $('login').hidden=true; $('account').hidden=false; $('welcome').textContent=data.username+' · 我的额度';
-  $('group').textContent=q?.member ? `${q.groupName} · ${q.groupSize} 人 · 个人份额 ${number(q.share*100)}%` : '尚未分配到组，请联系管理员';
+  $('group').textContent=q?.member ? `个人份额 ${number(q.share*100)}% · 同时用于 V5 和点数分配` : '尚未分配额度，请联系管理员';
   $('status').textContent=(stateNames[q?.status] || '等待分配额度') + (q?.autoAnlasFallback ? ' · V5 不足时自动按 Anlas 转扣（本站记账；上游可能消耗公共 V5）' : '');
   $('v5').textContent=`${number(q?.v5Available)} / ${number(q?.v5Capacity)}%`;
   $('v5bar').max=q?.v5Capacity || 1; $('v5bar').value=q?.v5Available || 0;

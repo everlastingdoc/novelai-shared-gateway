@@ -5,7 +5,7 @@ document.getElementById('status').after(box);
 const $ = id => document.getElementById(id);
 const n = value => value == null ? '未知' : Number(value).toLocaleString('zh-CN', {maximumFractionDigits:3});
 const date = value => {if (!value) return '未知'; const d = new Date(value);return Number.isNaN(d.getTime()) ? '未知' : d.toLocaleString('zh-CN');};
-const labels = { pending_opus:'等待 Opus', inactive_opus:'订阅不可用', stale:'余额已过期', active:'可用', cooldown:'限流冷却', quota_sync_error:'同步异常', disabled:'账户停用', unknown_balance:'余额未知' };
+const labels = { pending_opus:'等待 Opus', inactive_opus:'订阅不可用', stale:'余额已过期', active:'可用', cooldown:'限流冷却', quota_sync_error:'同步异常', disabled:'账户停用', unknown_balance:'余额未知', renewal_pending:'正在确认订阅续期' };
 function render(s) {
   $('sharedState').textContent=labels[s.status] || s.status;
   $('sharedSubscription').textContent=s.subscriptionActive && s.status!=='inactive_opus' ? `Opus 有效 · 到期 ${date(s.expiresAt)}` : '没有可用的 Opus 订阅';

@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { setMemberCredentials, loginMember, checkMemberLoginRate, createMemberSession, authenticateMemberSession, logoutMemberSession } from './member-auth.js';
-import { configureFairGroups, fairQuotaSummary, syncFairQuota, manageFairMember } from './fair-quota.js';
+import { configureFairGroups, fairQuotaSummary, syncFairQuota, manageFairMember, initializeSubscriptionCycle } from './fair-quota.js';
+import { migrateSinglePool, configureSinglePool, joinSinglePool, removeSinglePoolMember } from './single-pool.js';
 import { sharedAccountStatus } from './shared-status.js';
 const statusStreams = new Map();
 const error = (statusCode, message) => { throw Object.assign(new Error(message), { statusCode }); };
@@ -54,8 +55,16 @@ export async function handleMemberRoutes(req, res, url, deps) {
     deps.assertAdmin(req, url);
     if (req.method === 'GET') {
       const payload = await store.update(db => {
+        let migrationPending=false;
+        if(url.searchParams.get('model')==='single'&&db.settings.fairQuota?.allocationModel!=='single_pool') {
+          const draft={...db,settings:structuredClone(db.settings)};
+          try{migrateSinglePool(draft);db.settings=draft.settings;}catch(e){if(e.statusCode!==409)throw e;migrationPending=true;}
+        }
         syncFairQuota(db);
         return { groups: db.settings.fairQuota?.groups || [], status: db.settings.fairQuota?.status,
+          allocationModel:db.settings.fairQuota?.allocationModel||'legacy',migrationPending,
+          shareMode:db.settings.fairQuota?.shareMode||'custom',
+          subscriptionCycle:db.settings.fairQuota?.subscriptionCycle?{expiresAt:db.settings.fairQuota.subscriptionCycle.expiresAt,legacyPending:db.settings.fairQuota.subscriptionCycle.legacyPending===true}:null,
           shared: sharedAccountStatus(db),autoAnlasFallback: db.settings.fairQuota?.autoAnlasFallback === true,
           configVersion: db.settings.fairQuota?.configVersion ?? 1,
           publicBaseUrl: memberPublicBaseUrl(db),
@@ -66,6 +75,36 @@ export async function handleMemberRoutes(req, res, url, deps) {
     }
     if (req.method !== 'POST') error(405, 'method not allowed');
     const body = await json(req);
+    if(body.action==='allocation') {
+      const result=await store.update(db=>{
+        const s=configureSinglePool(db,body);
+        return {configVersion:s.configVersion,shareMode:s.shareMode};
+      },{collections:['settings'],immediate:true});
+      reply(res,200,result);return true;
+    }
+    if(body.action==='remove-member') {
+      const result=await store.update(db=>removeSinglePoolMember(db,body),{collections:['users','settings'],immediate:true});
+      reply(res,200,result);return true;
+    }
+    if(body.action==='sync-period') {
+      const result=await store.update(db=>initializeSubscriptionCycle(db,body.expectedConfigVersion),{collections:['settings'],immediate:true});
+      reply(res,200,result);return true;
+    }
+    if(body.action==='create-member') {
+      const result=await store.update(async db=>{
+        const draft={...db,users:structuredClone(db.users),settings:structuredClone(db.settings)};
+        migrateSinglePool(draft);
+        if(draft.users.length>=100)error(409,'共享成员总数不能超过 100');
+        const user={id:deps.createId('usr'),token:deps.createPublicToken('NAI'),balance:0,enabled:true,note:String(body.note||'').slice(0,120),createdAt:new Date().toISOString()};
+        const password=body.password===undefined?randomBytes(24).toString('base64url'):body.password;
+        draft.users.push(user);
+        const credentials=await setMemberCredentials(draft,user.id,{username:body.username,password});
+        joinSinglePool(draft,user.id,body);
+        db.users=draft.users;db.settings=draft.settings;
+        return {...credentials,password,configVersion:draft.settings.fairQuota.configVersion};
+      },{collections:['users','settings'],immediate:true});
+      reply(res,200,result);return true;
+    }
     if (['transfer-quota','preview-delete-member','delete-member'].includes(body.action)) {
       const preview=body.action==='preview-delete-member';
       const result=await store.update(db=>manageFairMember(db,body),preview?{persist:false}:{collections:['users','settings'],immediate:true});
@@ -116,6 +155,7 @@ export async function handleMemberRoutes(req, res, url, deps) {
       if(hasGroup&&(typeof body.groupId!=='string'||body.userId))error(400,'只有创建新成员时可以指定 groupId');
       const result = await store.update(async db => {
         const draft = { ...db, users: structuredClone(db.users),settings:structuredClone(db.settings) };
+        if(!body.userId&&draft.settings.fairQuota?.allocationModel==='single_pool')error(409,'请使用新版成员创建入口');
         let userId = body.userId;
         if (!userId) {
           if (draft.users.length >= 200) error(409, '账户数已达上限');

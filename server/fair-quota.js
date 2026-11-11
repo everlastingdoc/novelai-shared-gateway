@@ -14,16 +14,18 @@ const totals = (s) => {for(const b of Object.values(s.balances)) b.anlasAvailabl
 
 const emptyBalance = () => ({v5Available:0,anlasAvailable:0,anlasFixedAvailable:0,anlasPurchasedAvailable:0});
 function upgradeGroups(s) {
-  if (!s.groups) s.groups=s.members.map((id,i)=>({id:`group_${i+1}`,name:`第 ${i+1} 组`,members:[id]}));
-  for(const group of s.groups){group.share ??= .25;group.memberWeights=Object.fromEntries(group.members.map(id=>[id,group.memberWeights?.[id] ?? 1]));}
-  s.version=2;s.configVersion ||= 1;s.configurationHistory ||= [];
+  if (s.allocationModel !== 'single_pool') {
+    if (!s.groups) s.groups=s.members.map((id,i)=>({id:`group_${i+1}`,name:`第 ${i+1} 组`,members:[id]}));
+    for(const group of s.groups){group.share ??= .25;group.memberWeights=Object.fromEntries(group.members.map(id=>[id,group.memberWeights?.[id] ?? 1]));}
+  }
+  s.version=s.allocationModel==='single_pool'?3:2;s.configVersion ||= 1;s.configurationHistory ||= [];
   s.unallocatedV5 ||= 0;
   s.spent.fallbackFixed ||= 0;s.spent.fallbackPurchased ||= 0;s.spent.fallbackV5 ||= 0;
   s.fallbackBuffer ||= {fixed:0,purchased:0};s.fallbackTotalsByUser ||= {};s.sharedV5Debt ||= 0;
   return s;
 }
-const groupFor = (s,id) => s.groups.find(g=>g.members.includes(id));
-const weight = (s,id) => { const group=groupFor(s,id);if(!group)return 0;const total=group.members.reduce((n,member)=>n+(group.memberWeights?.[member] ?? 1),0);return total>0?(group.share ?? .25)*((group.memberWeights?.[id] ?? 1)/total):0; };
+const groupFor = (s,id) => s.groups?.find(g=>g.members.includes(id));
+const weight = (s,id) => { if(s.allocationModel==='single_pool')return s.shares[id] || 0;const group=groupFor(s,id);if(!group)return 0;const total=group.members.reduce((n,member)=>n+(group.memberWeights?.[member] ?? 1),0);return total>0?(group.share ?? .25)*((group.memberWeights?.[id] ?? 1)/total):0; };
 export function assertFairQuotaIdle(db) {
   if(anyHeld(db.settings?.fairQuota || {reservations:{}})||rows(db.jobs).some(job=>['queued','running'].includes(job.status)))fail('有排队、运行或预留额度的任务，请结清后调整',409);
 }
@@ -42,6 +44,7 @@ export function configureFairQuota(db, memberIds) {
 
 // 仅由管理员接口调用。额度只存在于叶子钱包，组没有第二份可消费余额。
 export function configureFairGroups(db, groups, options = {}) {
+  if(db.settings?.fairQuota?.allocationModel==='single_pool')fail('请在成员与额度页面调整份额',409);
   if (!Array.isArray(groups) || groups.length!==4) fail('必须配置四个顶层共享组',400);
   const ids=new Set(),members=new Set(),users=rows(db.users);
   const normalized=groups.map(g=>{
@@ -115,6 +118,7 @@ export function configureFairGroups(db, groups, options = {}) {
 
 // 管理调账始终在独立副本上执行，所有验证通过才提交。
 export function manageFairMember(db, body, now=Date.now()) {
+  if(db.settings?.fairQuota?.allocationModel==='single_pool'&&body.action!=='transfer-quota')fail('请使用成员与额度页面删除成员',409);
   assertFairQuotaIdle(db);
   const draft={...db,users:structuredClone(db.users),settings:structuredClone(db.settings)};
   const s=syncFairQuota(draft,now);
@@ -242,9 +246,45 @@ function recordV5Reconciliation(s, incoming, now) {
 
 function readSnapshot(a) {
   const percent=number(a.v5UsagePercent), fixed=number(a.quotaFixed), purchased=number(a.quotaPurchased);
-  return {at:stamp(a.quotaCheckedAt),v5: a.v5UsageIsNegative ? 0 : percent === null ? null : Math.max(0,Math.min(100,percent)),
+  return {at:stamp(a.quotaCheckedAt),expiresAt:stamp(a.subscriptionExpiresAt)||null,v5: a.v5UsageIsNegative ? 0 : percent === null ? null : Math.max(0,Math.min(100,percent)),
     anlas:fixed === null || purchased === null ? null : Math.max(0,fixed+purchased),anlasFixed:fixed===null?null:Math.max(0,fixed),anlasPurchased:purchased===null?null:Math.max(0,purchased),
     seconds:number(a.v5UsageTimeUntilNextPercent)};
+}
+
+// 订阅到期时间是本地周期标识。切期等待所有预留结清及两次独立官方查询；
+// 只替换订阅点数，V5、购买点数和历史消费都保留。
+function replaceSubscriptionPeriod(s, incoming, startsAt, now, reason) {
+  const previous=structuredClone(s.subscriptionCycle),before=sum(s,'anlasFixedAvailable');
+  const currentFallback=Object.values(s.reservations).filter(c=>c.accountId===s.boundAccountId&&c.status==='settled'&&c.billingMode==='anlas_fallback'&&c.settledAt>=startsAt&&c.settledAt<=incoming.at).reduce((n,c)=>n+(c.fixed||0),0);
+  // 上游没有逐笔付费回执，未核销的本期续用仍须扣除，不能借切期退款。
+  const retainedFallback=Math.min(currentFallback,s.fallbackBuffer.fixed);
+  const available=Math.max(0,incoming.anlasFixed-retainedFallback);
+  for(const b of Object.values(s.balances))b.anlasFixedAvailable=0;
+  distribute(s,'anlasFixed',available);
+  s.fallbackBuffer.fixed=retainedFallback;
+  s.spent.anlas=Math.max(0,s.spent.anlas-s.spent.anlasFixed);
+  s.spent.anlasFixed=0;s.spent.fallbackFixed=0;
+  s.subscriptionCycle={accountId:s.boundAccountId,expiresAt:incoming.expiresAt,startsAt,initializedAt:now,sourceCheckedAt:incoming.at,legacyPending:false};
+  delete s.pendingSubscriptionCycle;s.configVersion+=1;
+  s.subscriptionCycleHistory=[...(s.subscriptionCycleHistory||[]),{at:now,reason,previous,current:structuredClone(s.subscriptionCycle),before,official:incoming.anlasFixed,retainedFallback,after:available}].slice(-100);
+}
+
+export function initializeSubscriptionCycle(db, expectedConfigVersion, now=Date.now()) {
+  assertFairQuotaIdle(db);
+  const draft={...db,settings:structuredClone(db.settings)};
+  const s=syncFairQuota(draft,now);
+  if(!s?.subscriptionCycle)fail('请先向官方刷新订阅状态',409);
+  if(!s.subscriptionCycle.legacyPending)return {alreadySynced:true};
+  if(expectedConfigVersion!==s.configVersion)fail('成员信息已更新，请刷新页面后重试',409);
+  const account=rows(db.accounts).find(a=>a.id===s.boundAccountId),incoming=readSnapshot(account);
+  if(s.status!=='active'||incoming.anlasFixed===null||!incoming.expiresAt||incoming.at<=s.subscriptionCycle.observedAt||incoming.at<s.lastSettlementAt)fail('请等待请求完成，再向官方刷新额度后同步',409);
+  // NovelAI 订阅按 30 天续费（官方 FAQ）；只用于已有旧账本首次补正。
+  const startsAt=incoming.expiresAt-30*86400000;
+  if(startsAt>now||startsAt<0)fail('无法确认当前订阅周期，请检查官方订阅状态',409);
+  replaceSubscriptionPeriod(s,incoming,startsAt,now,'legacy-initialization');
+  s.snapshot={...s.snapshot,anlasFixed:incoming.anlasFixed,anlas:incoming.anlasFixed+s.snapshot.anlasPurchased,expiresAt:incoming.expiresAt};
+  totals(s);db.settings=draft.settings;
+  return {alreadySynced:false,subscriptionCycle:structuredClone(s.subscriptionCycle),anlasFixedAvailable:sum(s,'anlasFixedAvailable')};
 }
 
 export function syncFairQuota(db, now = Date.now()) {
@@ -265,11 +305,21 @@ export function syncFairQuota(db, now = Date.now()) {
   if(!s.snapshot) {
     if(incoming.v5===null || incoming.anlas===null) {s.status='unknown_balance';return s;}
     s.snapshot=incoming;s.lastRefillAt=now;
+    if(incoming.expiresAt)s.subscriptionCycle={accountId:account.id,expiresAt:incoming.expiresAt,initializedAt:now,legacyPending:false};
     distribute(s,'v5',Math.max(0,incoming.v5-s.unallocatedV5));distribute(s,'anlasFixed',incoming.anlasFixed);distribute(s,'anlasPurchased',incoming.anlasPurchased);
     recordV5Reconciliation(s,incoming,now);
     return s;
   }
   const old=s.snapshot;
+  // 老账本缺少周期信息时只登记基准；补正由管理员明确执行一次，普通刷新不退款。
+  if(!s.subscriptionCycle&&incoming.expiresAt)s.subscriptionCycle={accountId:account.id,expiresAt:incoming.expiresAt,observedAt:incoming.at,legacyPending:true};
+  const cycle=s.subscriptionCycle;
+  const renewal=cycle?.accountId===account.id&&incoming.expiresAt>=cycle.expiresAt+86400000&&incoming.at>=cycle.expiresAt;
+  let renewalConfirmed=false;
+  if(renewal) {
+    if(s.pendingSubscriptionCycle?.expiresAt!==incoming.expiresAt)s.pendingSubscriptionCycle={expiresAt:incoming.expiresAt,firstCheckedAt:incoming.at};
+    renewalConfirmed=incoming.at>s.pendingSubscriptionCycle.firstCheckedAt;
+  } else delete s.pendingSubscriptionCycle;
   // 官方字段表示恢复完整 1% 的秒数。旧快照超过十分钟后不再推算恢复。
   const until=Math.min(now,old.at+STALE_MS);
   if(old.seconds>0 && until>s.lastRefillAt) {
@@ -283,10 +333,14 @@ export function syncFairQuota(db, now = Date.now()) {
   }
   s.lastRefillAt=Math.max(s.lastRefillAt,until);
   // 并发生成期间的快照无法归属消费，待全部结清且取得新快照后校准。
-  if(incoming.at>old.at && incoming.at>=s.lastSettlementAt && !anyHeld(s) && incoming.v5!==null && incoming.anlas!==null) {
+  if(incoming.at>old.at && incoming.at>=s.lastSettlementAt && !anyHeld(s) && incoming.v5!==null && incoming.anlas!==null && (!renewal||renewalConfirmed)) {
     // 快照用于来源核对和安全派发，不把未知消费分摊给闲置成员，也不把差额当恢复增发。
     recordV5Reconciliation(s,incoming,now);
     for(const [resource,pool] of [['anlasFixed','fixed'],['anlasPurchased','purchased']]) {
+      if(resource==='anlasFixed'&&renewal) {
+        replaceSubscriptionPeriod(s,incoming,Math.max(cycle.expiresAt,incoming.expiresAt-30*86400000),now,'renewal');
+        continue;
+      }
       // 本地转扣不是已证实的上游 Anlas 消费，绝不加进普通充值校正。
       let delta=incoming[resource]-old[resource]+s.spent[resource];
       if(delta<0) {
@@ -300,6 +354,7 @@ export function syncFairQuota(db, now = Date.now()) {
   }
   // 未能对账的旧基准也不能无限使用，否则连续任务可能永远绕过过期检查。
   if(now-s.snapshot.at>STALE_MS) s.status='stale';
+  if(renewal&&!renewalConfirmed || renewal&&s.subscriptionCycle.expiresAt!==incoming.expiresAt)s.status='renewal_pending';
   return s;
 }
 
@@ -310,7 +365,7 @@ export function quoteFairRequest(request = {}, options = {}) {
 export function reserveFairQuota(db,user,job,account,now=Date.now()) {
   const s=syncFairQuota(db,now);
   if(!s?.enabled) return null;
-  if(!s.members.includes(user.id)) fail('该用户未加入共享分组账本',403);
+  if(!s.members.includes(user.id)) fail('该用户未加入共享账本，请管理员分配额度',403);
   if(s.status!=='active') fail(`共享 Opus 额度暂不可用：${s.status}`,503);
   if(account.id!==s.boundAccountId) fail('共享账本只能使用绑定的 Opus 账号',503);
   if(!job.id) fail('任务缺少持久化 ID',500);
@@ -358,7 +413,7 @@ export function reserveFairQuota(db,user,job,account,now=Date.now()) {
       s.balances[user.id].anlasFixedAvailable-=fixed;s.balances[user.id].anlasPurchasedAvailable-=purchased;totals(s);
     } else s.balances[user.id][field]-=q.amount;
   }
-  const charge={...q,fixed,purchased,...(fallback?{billingMode:'anlas_fallback',v5Equivalent,sharedV5Reserved,upstreamBilling:'shared_or_anlas'}:{}),configVersion:s.configVersion,groupId:groupFor(s,user.id)?.id,userId:user.id,accountId:account.id,status:'reserved',reservedAt:now};
+  const charge={...q,fixed,purchased,...(fallback?{billingMode:'anlas_fallback',v5Equivalent,sharedV5Reserved,upstreamBilling:'shared_or_anlas'}:{}),subscriptionExpiresAt:s.subscriptionCycle?.expiresAt??null,configVersion:s.configVersion,groupId:groupFor(s,user.id)?.id,userId:user.id,accountId:account.id,status:'reserved',reservedAt:now};
   s.reservations[job.id]=charge;job.fairCharge=charge;
   return charge;
 }

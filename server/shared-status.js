@@ -32,7 +32,7 @@ export function sharedAccountStatus(db, now = Date.now()) {
   const validSubscription=account.enabled===true&&account.subscriptionActive===true&&number(account.quotaTier)===3&&(!account.subscriptionExpiresAt || (expires!==null&&expires>now));
   const v5=number(account.v5UsagePercent),fixed=number(account.quotaFixed),purchased=number(account.quotaPurchased);
   const cooling=cooldown!==null&&cooldown>now;
-  const status=!validSubscription?'inactive_opus':quotaSyncError?'quota_sync_error':stale?'stale':cooling?'cooldown':v5===null||fixed===null||purchased===null?'unknown_balance':'active';
+  const status=!validSubscription?'inactive_opus':quotaSyncError?'quota_sync_error':stale?'stale':state.status==='renewal_pending'?'renewal_pending':cooling?'cooldown':v5===null||fixed===null||purchased===null?'unknown_balance':'active';
   const concurrencyLimit = sharedAccountConcurrency(account, now);
   return {...base,status,concurrencyLimit,subscriptionActive:bool(account.subscriptionActive),expiresAt:iso(expires),officialCheckedAt:iso(checked),stale,
     v5Percent:v5,v5IsNegative:bool(account.v5UsageIsNegative),refillSecondsPerPercent:number(account.v5UsageTimeUntilNextPercent),

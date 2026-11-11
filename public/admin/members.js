@@ -1,100 +1,138 @@
 import { initGallery } from './gallery.js';
 const $=id=>document.getElementById(id);
-const gallery = initGallery({ api, getToken: () => $('adminToken').value, notice });
-let state=null,upstream=null,publicBase='',draft=[],dirty=false,preview=null,confirmTask=null,busy=false;
-let allocationMode='direct',directShares={},redistributeByMode={direct:true,advanced:false};
-const number=v=>v===null||v===undefined?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:3});
-const percent=v=>number(Number(v||0)*100)+'%';
-const statusNames={active:'可用',pending_opus:'等待接入',inactive_opus:'已暂停',stale:'等待同步',quota_sync_error:'同步失败',cooldown:'冷却中',unknown_balance:'余额未知'};
-const displayTime=v=>v?new Date(v).toLocaleString('zh-CN'):'尚未同步';
-function notice(text,error=false){$('message').textContent=text;$('message').hidden=!text;$('message').classList.toggle('error',error);}
-async function api(path='/api/admin/member-management',body,method){
- const response=await fetch(path,{method:method||(body===undefined?'GET':'POST'),headers:{'x-admin-token':$('adminToken').value,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
- let result;try{result=await response.json();}catch{throw new Error('响应异常，请检查管理隧道是否连接。');}
- if(!response.ok)throw new Error(result.message||result.error?.message||result.error||'请求失败');return result;
-}
-const manage=body=>api('/api/admin/member-management',body);
-function run(fn){return async event=>{event?.preventDefault();if(busy)return;busy=true;const button=event?.currentTarget;const wasDisabled=button?.disabled;if(button?.tagName==='BUTTON')button.disabled=true;notice('');try{await fn(event);}catch(e){notice(e.message,true);}finally{busy=false;if(button?.tagName==='BUTTON')button.disabled=wasDisabled;}};}
-function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
-function option(value,text){const n=node('option',text);n.value=value;return n;}
-function groupOf(id,groups=state.groups){return groups.find(g=>g.members.includes(id));}
+const gallery=initGallery({api,getToken:()=>$('adminToken').value,notice});
+let state=null,upstream=null,publicBase='',busy=false,editing=false,shares={},shareMode='equal',selectedMember=null,confirmTask=null,noticeTimer;
+const number=value=>value===null||value===undefined?'—':Number(value).toLocaleString('zh-CN',{maximumFractionDigits:3});
+const percent=value=>number(Number(value||0)*100)+'%';
+const time=value=>value?new Date(value).toLocaleString('zh-CN'):'尚未同步';
+const statusNames={active:'账号可用',pending_opus:'等待接入',inactive_opus:'账号已暂停',stale:'等待同步',quota_sync_error:'同步失败',cooldown:'请求冷却中',unknown_balance:'余额未知',renewal_pending:'正在确认订阅续期'};
+const memberName=u=>u.username||u.note||u.id;
+function node(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el;}
+function notice(text,error=false){clearTimeout(noticeTimer);$('message').textContent=text;$('message').hidden=!text;$('message').classList.toggle('error',error);if(text&&!error)noticeTimer=setTimeout(()=>{$('message').hidden=true;},6000);}
 function modal(id){$(id).showModal();}
-function markDirty(){dirty=true;preview=null;$('draftHint').textContent='有未保存的修改 · 请先预览';updateGroupCounts();}
-function tab(id){document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===id)));for(const panel of ['membersPanel','groupsPanel','settingsPanel','galleryPanel'])$(panel).hidden=panel!==id;if(id==='galleryPanel')gallery.show();else gallery.hide();}
-function updateOverview(){const s=state.shared||{};$('overviewStatus').textContent=statusNames[s.status||state.status]||'待核验';$('overviewDate').textContent='官方查询 '+displayTime(s.officialCheckedAt);$('overviewV5').textContent=number(s.v5Percent)+'%';$('overviewBar').value=s.v5Percent||0;$('overviewRecovery').textContent=s.refillSecondsPerPercent>0?'每恢复 1% 约 '+number(s.refillSecondsPerPercent/60)+' 分钟':'恢复周期等待官方数据';$('overviewAnlas').textContent=number(s.anlasFixed);$('overviewPurchased').textContent='购买余额 '+number(s.anlasPurchased);$('overviewQueue').textContent=(s.running||0)+' / '+(s.queued||0);$('overviewMembers').textContent=state.users.filter(u=>u.enabled).length+' 位启用成员 · 全局最多 4 并发';$('connectedHint').textContent='已连接 · 页面更新 '+new Date().toLocaleTimeString('zh-CN');}
-function renderMembers(){const query=$('search').value.trim().toLowerCase(),filter=$('filterGroup').value;const users=state.users.filter(u=>(u.username||u.note||u.id).toLowerCase().includes(query)&&(!filter||(filter==='unassigned'?!groupOf(u.id):groupOf(u.id)?.id===filter)));$('memberCount').textContent=users.length+' / '+state.users.length+' 位成员';$('members').replaceChildren();for(const u of users){const row=node('tr'),name=node('td',u.username||u.note||u.id);name.append(node('span',u.enabled?'已启用':'已停用','badge '+(u.enabled?'ok':'off')));const group=node('td',groupOf(u.id)?.name||'未分组');group.append(node('span',percent(u.quota?.share),'cell-sub'));row.append(name,group,node('td',number(u.quota?.v5Available)),node('td',number(u.quota?.anlasFixedAvailable)),node('td',number(u.quota?.anlasPurchasedAvailable)));const actions=node('td'),wrap=node('div',undefined,'row-actions');for(const [text,fn] of [['分发信息',()=>delivery(u)],['重置密码',()=>editMember(u)],['调整额度',()=>openTransfer(u)],['删除',()=>openDelete(u)],[u.enabled?'停用':'恢复',()=>confirmMemberStatus(u)]]){const b=node('button',text,'secondary');b.type='button';b.onclick=run(fn);if(text==='重置密码'&&!u.enabled)b.disabled=true;wrap.append(b);}actions.append(wrap);row.append(actions);$('members').append(row);}if(!users.length){const td=node('td','没有符合条件的成员','empty');td.colSpan=6;const tr=node('tr');tr.append(td);$('members').append(tr);}}
-function renderDraft(){
- draft=structuredClone(state.groups);for(const g of draft){g.share??=.25;g.memberWeights??={};}dirty=false;preview=null;redistributeByMode={direct:true,advanced:false};$('redistribute').checked=true;updateRedistributeHint();$('draftHint').textContent='尚无修改';allocationMode='direct';$('allocationMode').value='direct';$('directAllocation').hidden=false;$('advancedAllocation').hidden=true;renderAdvancedDraft();renderDirectDraft();}
-function renderAdvancedDraft(){
- $('groupCards').replaceChildren();$('assignments').replaceChildren();
- for(const g of draft){const card=node('div',undefined,'group-card'),label=node('label','组名'),input=node('input');input.value=g.name;input.maxLength=60;input.setAttribute('aria-label','编辑'+g.name);input.oninput=()=>{g.name=input.value;markDirty();};label.append(input);const count=node('strong');count.dataset.countGroup=g.id;const shareLabel=node('label','总份额（%）'),share=node('input');share.type='number';share.min='0';share.max='100';share.step='any';share.value=Number((g.share*100).toFixed(8));share.setAttribute('aria-label',g.name+' 总份额百分比');share.oninput=()=>{g.share=share.value===''?NaN:Number(share.value)/100;markDirty();};shareLabel.append(share);card.append(label,count,shareLabel);$('groupCards').append(card);}
- for(const u of state.users){const row=node('tr');row.append(node('td',(u.username||u.id)+(u.enabled?'':'（停用）')));const td=node('td'),select=node('select');select.setAttribute('aria-label',(u.username||u.id)+' 的目标分组');select.append(option('','不在任何组'));for(const g of draft)select.append(option(g.id,g.name));select.value=groupOf(u.id,draft)?.id||'';select.disabled=!u.enabled;const weightTd=node('td'),weight=node('input');weight.type='number';weight.min='0';weight.max='1000000';weight.step='any';weight.value=groupOf(u.id,draft)?.memberWeights[u.id]??1;weight.setAttribute('aria-label',(u.username||u.id)+' 的组内权重');weight.disabled=!select.value;weight.style.width='100px';select.onchange=()=>{const value=Number.isFinite(Number(weight.value))?Number(weight.value):1;for(const g of draft){g.members=g.members.filter(id=>id!==u.id);delete g.memberWeights[u.id];}const target=draft.find(g=>g.id===select.value);if(target){target.members.push(u.id);target.memberWeights[u.id]=value;}weight.disabled=!target;markDirty();};weight.oninput=()=>{const g=groupOf(u.id,draft);if(g)g.memberWeights[u.id]=weight.value===''?NaN:Number(weight.value);markDirty();};td.append(select);weightTd.append(weight);const after=node('td');after.dataset.shareUser=u.id;row.append(td,weightTd,node('td',percent(u.quota?.share)),after);$('assignments').append(row);}updateGroupCounts();
+function requireSaved(){if(editing)throw new Error('请先保存或取消份额调整。');}
+async function api(path='/api/admin/member-management',body,method){
+  const response=await fetch(path,{method:method||(body===undefined?'GET':'POST'),headers:{'x-admin-token':$('adminToken').value,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+  let result;try{result=await response.json();}catch{throw new Error('响应异常，请检查管理隧道是否连接。');}
+  if(!response.ok)throw new Error(result.message||result.error?.message||result.error||'请求失败');return result;
 }
-function updateGroupCounts(){
- const total=draft.reduce((n,g)=>n+g.share,0);$('shareTotal').textContent='四组总份额：'+percent(total)+'（必须为 100%）';$('shareTotal').classList.toggle('danger',!Number.isFinite(total)||Math.abs(total-1)>1e-8);
- for(const g of draft){const el=document.querySelector('[data-count-group="'+g.id+'"]');if(el)el.textContent=g.members.length+' 人';}
- for(const el of document.querySelectorAll('[data-share-user]')){const g=groupOf(el.dataset.shareUser,draft),sum=g?.members.reduce((n,id)=>n+Number(g.memberWeights[id]??1),0);const share=g&&sum>0?g.share*Number(g.memberWeights[el.dataset.shareUser]??1)/sum:0;el.textContent=percent(share)+' · V5 容量 '+number(100*share);}
+const manage=body=>api('/api/admin/member-management'+(body===undefined?'?model=single':''),body);
+function updateButtons(){
+  const unavailable=!state||state.migrationPending||busy;
+  for(const id of ['newMember','editShares'])$(id).disabled=unavailable||editing;
+  for(const id of ['saveMember','equalize','cancelShares','confirmAction','refresh','refreshUpstream','toggleUpstream','saveUpstreamPst','syncPeriod'])$(id).disabled=busy||(!!state&&['refreshUpstream','toggleUpstream','saveUpstreamPst'].includes(id)&&!upstream);
+  $('saveShares').disabled=busy||!validShares();
+  document.querySelectorAll('[data-member-manage]').forEach(el=>el.disabled=busy||editing||state?.migrationPending);
 }
-function updateRedistributeHint(){$('balancePreserveWarning').hidden=$('redistribute').checked;}
-function validateDraft(){
- if(allocationMode==='direct'){const values=Object.values(directShares);if(values.some(v=>!Number.isFinite(v)||v<0||v>100))throw new Error('每位成员的份额必须在 0% 到 100% 之间。');if(Math.abs(values.reduce((n,v)=>n+v,0)-100)>1e-6)throw new Error('成员份额合计必须为 100%，请调整后再预览。');}
- if(draft.some(g=>!Number.isFinite(g.share)||g.share<0||g.share>1)||Math.abs(draft.reduce((n,g)=>n+g.share,0)-1)>1e-8)throw new Error('四组份额须合计 100%。');
- if(draft.some(g=>!g.members.length&&g.share!==0))throw new Error('空组份额须为 0%。');
- if(!draft.some(g=>g.members.length))throw new Error('至少保留一位已分组成员。');
- for(const g of draft){let total=0;for(const id of g.members){const weight=Number(g.memberWeights[id]??1);if(!Number.isFinite(weight)||weight<0||weight>1e6)throw new Error('组内权重须在 0 到 1000000 之间。');total+=weight;}if(g.share>0&&total<=0)throw new Error('有份额的组至少一位成员权重须大于 0。');}
+function run(fn){return async event=>{event?.preventDefault();if(busy)return;busy=true;updateButtons();notice('');try{await fn(event);}catch(e){notice(e.message,true);}finally{busy=false;updateButtons();}};}
+function tab(id){
+  document.querySelectorAll('[data-tab]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.tab===id)));
+  for(const panel of ['membersPanel','settingsPanel','galleryPanel'])$(panel).hidden=panel!==id;
+  if(id==='galleryPanel')gallery.show();else gallery.hide();
 }
-// 两种界面共用同一份草稿；切换时由草稿重新计算，避免旧表单覆盖修改。
-function draftUserShare(id){const g=groupOf(id,draft),sum=g?.members.reduce((n,key)=>n+Number(g.memberWeights[key]??1),0);return g&&sum>0?g.share*Number(g.memberWeights[id]??1)/sum:0;}
-function renderDirectDraft(){directShares={};$('directRows').replaceChildren();for(const u of state.users){const value=Number((draftUserShare(u.id)*100).toFixed(10));directShares[u.id]=value;const row=node('tr'),td=node('td'),input=node('input');input.type='number';input.min='0';input.max='100';input.step='any';input.value=value;input.disabled=!u.enabled&&!groupOf(u.id,draft);input.style.width='130px';input.setAttribute('aria-label',(u.username||u.id)+' 的具体总份额百分比');input.oninput=()=>{directShares[u.id]=input.value===''?NaN:Number(input.value);applyDirectShares();markDirty();updateDirectTotal();};td.append(input);if(input.disabled)td.append(node('span','先启用再分配','cell-sub'));row.append(node('td',(u.username||u.id)+(u.enabled?'':'（停用）')),node('td',percent(u.quota?.share)),td,node('td',number(u.quota?.v5Available)));$('directRows').append(row);}updateDirectTotal();}
-function applyDirectShares(){for(const u of state.users)if(u.enabled&&!groupOf(u.id,draft))draft[0].members.push(u.id);for(const g of draft){g.memberWeights={};let total=0;for(const id of g.members){const value=directShares[id]??0;g.memberWeights[id]=value;total+=value;}g.share=total/100;}}
-function updateDirectTotal(){const total=Object.values(directShares).reduce((n,v)=>n+v,0);$('directTotal').textContent='已分配 '+number(total)+'% / 100%'+(Number.isFinite(total)?' · '+(total<=100?'还需分配 '+number(100-total)+'%':'超出 '+number(total-100)+'%'):' · 请填写有效数字');$('directTotal').classList.toggle('danger',!Number.isFinite(total)||Math.abs(total-100)>1e-6);}
-$('allocationMode').onchange=()=>{redistributeByMode[allocationMode]=$('redistribute').checked;allocationMode=$('allocationMode').value;$('redistribute').checked=redistributeByMode[allocationMode];preview=null;updateRedistributeHint();$('directAllocation').hidden=allocationMode!=='direct';$('advancedAllocation').hidden=allocationMode!=='advanced';if(allocationMode==='direct')renderDirectDraft();else renderAdvancedDraft();};
-async function refresh({reset=true}={}){const result=await manage();state=result;state.users.sort((a,b)=>(a.username||a.id).localeCompare(b.username||b.id));$('autoFallback').checked=state.autoAnlasFallback===true;const filter=$('filterGroup').value;$('filterGroup').replaceChildren(option('','全部分组'),option('unassigned','未分组'));for(const g of state.groups)$('filterGroup').append(option(g.id,g.name));$('filterGroup').value=filter;$('dashboard').hidden=false;$('connect').hidden=true;$('topActions').hidden=false;updateOverview();renderMembers();if(reset)renderDraft();try{await loadUpstream();}catch(e){notice('成员数据已刷新；上游状态读取失败：'+e.message,true);}}
-async function loadUpstream(){const summary=await api('/api/admin/summary');const id=state.users.find(u=>u.quota?.boundAccountId)?.quota.boundAccountId;const a=summary.accounts?.find(a=>a.id===id);publicBase=String(state.publicBaseUrl||summary.settings?.publicBaseUrl||location.origin).replace(/\/$/,'');upstream=a?{id,enabled:a.enabled===true,tier:a.quotaTier,inFlight:Number(a.inFlight||0),fixed:a.quotaFixed,purchased:a.quotaPurchased,v5:a.v5UsagePercent,checked:a.quotaCheckedAt,error:Boolean(a.quotaError)}:null;for(const id of ['refreshUpstream','toggleUpstream','saveUpstreamPst'])$(id).disabled=!upstream;if(!upstream){$('upstreamStatus').textContent='尚未绑定共享 Opus';return;}$('upstreamStatus').textContent=(upstream.enabled?'已启用':'已暂停')+' · '+(upstream.tier===3?'Opus':'订阅待核验')+' · 正在生成 '+upstream.inFlight;$('upstreamQuota').textContent='V5 '+number(upstream.v5)+'% · 订阅 '+number(upstream.fixed)+' · 购买 '+number(upstream.purchased);$('upstreamUpdated').textContent='官方查询 '+displayTime(upstream.checked)+(upstream.error?' · 查询失败':'');$('toggleUpstream').textContent=upstream.enabled?'暂停上游':'恢复上游';}
-function requireClean(){if(dirty)throw new Error('分组有未保存修改，请先预览保存或撤销修改。');}
-function randomPassword(){const bytes=crypto.getRandomValues(new Uint8Array(24));$('password').value=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');notice('随机密码已生成，保存后可复制分发信息。');}
-function editMember(user){requireClean();$('editingId').value=user?.id||'';$('username').value=user?.username||'';$('username').readOnly=Boolean(user);$('password').value='';$('password').type='password';$('showPassword').textContent='显示';$('createGroupLabel').hidden=Boolean(user);$('createGroup').required=false;$('createGroup').replaceChildren(option('','暂不入组，稍后分配'));for(const g of state.groups){const item=option(g.id,g.name+(g.members.length?'':'（先在分组页分配份额）'));item.disabled=!g.members.length;$('createGroup').append(item);}$('memberDialogTitle').textContent=user?'重置 '+user.username+' 的密码':'创建成员';$('saveMember').textContent=user?'保存新密码':'创建并生成分发信息';$('credentialHint').textContent=user?'原 API Key 保持不变，旧登录会话将失效。':'可加入已有分组，或暂不入组。新成员当前余额为 0；要启用空组，请在分组页同时分配成员与组份额。';modal('memberDialog');}
-async function delivery(user,password){const key=await manage({action:'member-key',userId:user.id});const portal=String(state.publicBaseUrl||publicBase||location.origin).replace(/\/$/,'');$('deliveryText').value=['成员入口：'+portal+'/','用户名：'+user.username,'密码：'+(password||'使用此前分配的密码；忘记请联系管理员重置'),'API Base：'+portal+'/v1','API Key：'+key.apiKey].join('\n');modal('deliveryDialog');}
-function confirmMemberStatus(u){requireClean();$('confirmTitle').textContent=(u.enabled?'停用 ':'恢复 ')+u.username;$('confirmDescription').textContent=u.enabled?'将禁止该成员登录和新的 API 调用。余额、分组、份额保留，不会分给其他成员。':'恢复该成员登录及 API 调用，继续使用原 Key 和保留额度。';confirmTask=async()=>{await manage({action:'member-status',userId:u.id,enabled:!u.enabled});$('confirmDialog').close();await refresh();notice('成员状态已更新。');};modal('confirmDialog');}
-async function previewGroups(){if(allocationMode==='direct')applyDirectShares();validateDraft();const body={action:'preview-groups',groups:structuredClone(draft),redistributeRemaining:$('redistribute').checked};const result=await manage(body);preview={...body,action:'groups',expectedConfigVersion:result.configVersion};$('previewRows').replaceChildren();for(const u of state.users){const after=result.users.find(v=>v.id===u.id)?.quota||{},before=u.quota||{};const tr=node('tr');for(const text of [u.username||u.id,percent(before.share)+' → '+percent(after.share),number(before.v5Available)+' / '+number(before.v5Capacity)+' → '+number(after.v5Available)+' / '+number(after.v5Capacity),number(before.anlasFixedAvailable)+' → '+number(after.anlasFixedAvailable),number(before.anlasPurchasedAvailable)+' → '+number(after.anlasPurchasedAvailable)])tr.append(node('td',text));$('previewRows').append(tr);}$('previewDescription').textContent=body.redistributeRemaining?'将保留每组总余额，按组内权重重新分配剩余余额；跨组转移请使用调整额度。确认后按下表调整。':'仅以后生效：只调整分组、未来恢复与新增额度分配；当前余额保持原样，不会按新份额重新分配。';modal('previewDialog');}
+function currentTotals(){return state.users.reduce((out,u)=>{for(const field of ['v5Available','anlasFixedAvailable','anlasPurchasedAvailable'])out[field]+=u.quota?.[field]||0;return out;},{v5Available:0,anlasFixedAvailable:0,anlasPurchasedAvailable:0});}
+function validShares(){const values=Object.values(shares);return !!state&&values.length===state.users.length&&values.every(value=>Number.isFinite(value)&&value>=0&&value<=1)&&Math.abs(values.reduce((n,v)=>n+v,0)-1)<=1e-6;}
+function renderOverview(){
+  const s=state.shared||{};
+  $('overviewStatus').textContent=statusNames[s.status||state.status]||'等待核验';
+  $('overviewAnlas').textContent=number(s.anlasFixed);
+  $('overviewDate').textContent=s.expiresAt?'续期 '+new Date(s.expiresAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'订阅日期待同步';
+  $('overviewPurchased').hidden=!(s.anlasPurchased>0);$('overviewPurchased').textContent='购买点数 '+number(s.anlasPurchased);
+  $('overviewV5').textContent=number(s.v5Percent)+'%';$('overviewBar').value=s.v5Percent||0;
+  $('overviewRecovery').textContent=s.refillSecondsPerPercent>0?'恢复 1% 约 '+number(s.refillSecondsPerPercent/60)+' 分钟':'恢复速度待官方同步';
+  $('overviewQueue').textContent=(s.running||0)+' / '+(s.queued||0);
+  $('overviewMembers').textContent=state.users.filter(u=>u.enabled).length+' 位启用成员 · 当前最多 '+(s.concurrencyLimit||4)+' 并发';
+  $('connectedHint').textContent='已连接 · 更新于 '+new Date().toLocaleTimeString('zh-CN');
+  $('allocationHint').textContent=(state.shareMode==='equal'?'大家均分':'按个人份额分配')+' · V5 和点数使用同一份额。';
+  const legacy=state.subscriptionCycle?.legacyPending,renewal=state.status==='renewal_pending';
+  const bad=!['active','cooldown'].includes(s.status||state.status);
+  $('syncNotice').hidden=!state.migrationPending&&!legacy&&!renewal&&!bad;
+  $('syncText').textContent=state.migrationPending?'还有请求在处理，完成后刷新即可调整成员额度。':legacy?'旧账本需要同步本期订阅点数。同步会保留本期消费、V5 和购买点数。':renewal?'正在确认新的订阅周期，完成后自动分配本期点数。':'账号状态需要更新，请向官方刷新额度。';
+  $('syncPeriod').hidden=state.migrationPending;$('syncPeriod').textContent=legacy?'同步本期点数':'向官方刷新';
+}
+function shareSummary(){
+  const sum=Object.values(shares).reduce((n,value)=>n+value,0);
+  $('shareTotal').textContent=validShares()?'已分配 100%':'已分配 '+(Number.isFinite(sum)?number(sum*100)+'%':'—')+'，合计需要 100%';
+  $('shareTotal').classList.toggle('invalid',!validShares());const amounts=currentTotals();
+  for(const u of state.users){
+    const share=shares[u.id],valid=Number.isFinite(share)&&share>=0&&share<=1;
+    const v5=$('preview-v5-'+u.id),points=$('preview-points-'+u.id);
+    if(v5)v5.textContent=valid?'保存后 '+number(amounts.v5Available*share)+'% / '+number(100*share)+'%':'请填写有效份额';
+    if(points)points.textContent=valid?'保存后 '+number(amounts.anlasFixedAvailable*share)+' 点'+(amounts.anlasPurchasedAvailable>0?'；购买 '+number(amounts.anlasPurchasedAvailable*share):''):'—';
+  }
+  updateButtons();
+}
+function renderMembers(){
+  const query=editing?'':$('search').value.trim().toLowerCase(),users=state.users.filter(u=>memberName(u).toLowerCase().includes(query));
+  $('memberCount').textContent=users.length+' 位成员';$('members').replaceChildren();$('memberFilters').hidden=editing;$('shareActions').hidden=!editing;
+  for(const u of users){
+    const row=node('tr'),name=node('td');name.append(node('span',memberName(u),'member-name'));if(!u.enabled)name.append(node('span','已停用','badge'));
+    const shareCell=node('td'),q=u.quota||{};
+    if(editing){const input=node('input');input.type='number';input.min='0';input.max='100';input.step='any';input.className='member-share-input';input.value=Number(((shares[u.id]||0)*100).toFixed(6));input.setAttribute('aria-label',memberName(u)+' 的份额百分比');input.oninput=()=>{shares[u.id]=input.value===''?NaN:Number(input.value)/100;shareMode='custom';shareSummary();};shareCell.append(input,document.createTextNode('%'));}else shareCell.textContent=percent(q.share);
+    const v5=node('td');v5.append(node('span',number(q.v5Available)+'% / '+number(q.v5Capacity)+'%','cell-value'));
+    const bar=node('progress',undefined,'v5-bar');bar.max=Math.max(q.v5Capacity||0,1e-9);bar.value=q.v5Available||0;bar.setAttribute('aria-label',memberName(u)+' 的 V5 余量');v5.append(bar);
+    const points=node('td');points.append(node('span',number(q.anlasFixedAvailable),'cell-value'));if(q.anlasPurchasedAvailable>0)points.append(node('span','购买 '+number(q.anlasPurchasedAvailable),'cell-sub'));
+    if(editing){const a=node('span',undefined,'after-value'),b=node('span',undefined,'after-value');a.id='preview-v5-'+u.id;b.id='preview-points-'+u.id;v5.append(a);points.append(b);}
+    const actions=node('td'),button=node('button','管理','secondary');button.dataset.memberManage=u.id;button.onclick=run(()=>openManage(u));actions.append(button);row.append(name,shareCell,v5,points,actions);$('members').append(row);
+  }
+  if(!users.length){const td=node('td','没有符合条件的成员','empty');td.colSpan=5;const row=node('tr');row.append(td);$('members').append(row);}
+  if(editing)shareSummary();else updateButtons();
+}
+async function refresh(){
+  state=await manage();state.users.sort((a,b)=>memberName(a).localeCompare(memberName(b)));$('autoFallback').checked=state.autoAnlasFallback===true;
+  $('dashboard').hidden=false;$('connect').hidden=true;$('topActions').hidden=false;renderOverview();renderMembers();
+  try{await loadUpstream();}catch(e){notice('成员信息已更新；官方账号状态暂时读取失败：'+e.message,true);}
+}
+async function loadUpstream(){
+  const summary=await api('/api/admin/summary'),id=state.users.find(u=>u.quota?.boundAccountId)?.quota.boundAccountId,a=summary.accounts?.find(a=>a.id===id);
+  publicBase=String(state.publicBaseUrl||summary.settings?.publicBaseUrl||location.origin).replace(/\/+$/,'');upstream=a?{id,enabled:a.enabled===true,tier:a.quotaTier,inFlight:Number(a.inFlight||0),fixed:a.quotaFixed,purchased:a.quotaPurchased,v5:a.v5UsagePercent,checked:a.quotaCheckedAt,error:Boolean(a.quotaError)}:null;
+  if(!upstream){$('upstreamStatus').textContent='等待绑定共享 Opus';updateButtons();return;}
+  $('upstreamStatus').textContent=(upstream.enabled?'已启用':'已暂停')+' · '+(upstream.tier===3?'Opus':'订阅待核验');$('upstreamQuota').textContent='V5 '+number(upstream.v5)+'% · 订阅点数 '+number(upstream.fixed)+(upstream.purchased>0?' · 购买点数 '+number(upstream.purchased):'');$('upstreamUpdated').textContent='官方查询 '+time(upstream.checked)+(upstream.error?' · 查询失败':'');$('toggleUpstream').textContent=upstream.enabled?'暂停使用':'恢复使用';updateButtons();
+}
+function randomPassword(){const bytes=crypto.getRandomValues(new Uint8Array(24));$('password').value=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
+function updateCreateHint(){
+  if($('editingId').value)return;const n=state.users.length+1,share=state.shareMode==='equal'?1/n:Number($('newShare').value)/100,totals=currentTotals();
+  $('credentialHint').textContent=(state.shareMode==='equal'?'加入后 '+n+' 人均分当前额度。':'其他成员保持相对比例，重新分配当前额度。')+'新成员约获得 V5 '+number(totals.v5Available*share)+'%（容量 '+number(100*share)+'%），订阅点数 '+number(totals.anlasFixedAvailable*share)+(totals.anlasPurchasedAvailable>0?'，购买点数 '+number(totals.anlasPurchasedAvailable*share):'')+'。';
+}
+function editMember(user){
+  requireSaved();$('manageDialog').close();$('editingId').value=user?.id||'';$('username').value=user?.username||'';$('username').readOnly=Boolean(user);$('password').value='';$('password').required=Boolean(user);$('password').type='password';$('showPassword').textContent='显示';$('passwordDetails').open=Boolean(user);$('passwordSummary').textContent=user?'设置新的登录密码':'自行设置密码（可选）';$('autoPasswordHint').hidden=Boolean(user);$('newShareLabel').hidden=Boolean(user)||state.shareMode==='equal';$('newShare').required=!user&&state.shareMode==='custom';$('newShare').value=Number((100/(state.users.length+1)).toFixed(6));$('memberDialogTitle').textContent=user?'重置密码 · '+memberName(user):'新增成员';$('saveMember').textContent=user?'保存新密码':'创建并分配额度';
+  if(user)$('credentialHint').textContent='原个人 Key 和余额保留；旧登录会话将失效。';else updateCreateHint();modal('memberDialog');
+}
+async function delivery(user,password){
+  const key=await manage({action:'member-key',userId:user.id}),portal=String(state.publicBaseUrl||publicBase||location.origin).replace(/\/+$/,'');$('deliveryText').value=['成员入口：'+portal+'/','用户名：'+user.username,'密码：'+(password||'使用原密码，忘记请联系管理员重置'),'API Base：'+portal+'/v1','API Key：'+key.apiKey].join('\n');modal('deliveryDialog');
+}
+function openManage(user){
+  selectedMember=user;const q=user.quota||{};$('manageName').textContent=memberName(user);$('manageQuota').textContent='份额 '+percent(q.share)+' · V5 '+number(q.v5Available)+'% / '+number(q.v5Capacity)+'% · 订阅点数 '+number(q.anlasFixedAvailable);$('managePurchased').hidden=!(q.anlasPurchasedAvailable>0);$('managePurchased').textContent='购买点数 '+number(q.anlasPurchasedAvailable);$('toggleMember').textContent=user.enabled?'停用成员':'恢复成员';$('resetPassword').disabled=!user.enabled;$('removeMember').disabled=state.users.length<=1;modal('manageDialog');
+}
+function confirmation(title,description,task){$('confirmTitle').textContent=title;$('confirmDescription').textContent=description;confirmTask=task;modal('confirmDialog');}
+async function refreshOfficial(){if(!upstream)throw new Error('尚未绑定官方账号');const result=await api('/api/admin/accounts/quota',{ids:[upstream.id]});if(result.failed)throw new Error('官方查询失败，请检查账号凭据。');}
 $('connect').onsubmit=run(async()=>{await refresh();if($('remember').checked)sessionStorage.setItem('nai.adminSession',$('adminToken').value);else sessionStorage.removeItem('nai.adminSession');});
-$('disconnect').onclick=()=>{gallery.reset();tab('membersPanel');sessionStorage.removeItem('nai.adminSession');localStorage.removeItem('nai.adminToken');$('adminToken').value='';$('deliveryText').value='';$('password').value='';$('upstreamPst').value='';document.querySelectorAll('dialog[open]').forEach(d=>d.close());state=null;upstream=null;preview=null;draft=[];dirty=false;$('dashboard').hidden=true;$('topActions').hidden=true;$('connect').hidden=false;notice('已断开管理会话。');};
-$('refresh').onclick=run(async()=>{requireClean();await refresh();notice('状态已刷新。');});
-$('search').oninput=renderMembers;$('filterGroup').onchange=renderMembers;
-for(const b of document.querySelectorAll('[data-tab]'))b.onclick=()=>tab(b.dataset.tab);
-for(const b of document.querySelectorAll('[data-close]'))b.onclick=()=>$(b.dataset.close).close();
-$('deliveryDialog').addEventListener('close',()=>{$('deliveryText').value='';});$('memberDialog').addEventListener('close',()=>{$('password').value='';});
-$('newMember').onclick=run(()=>editMember());$('generatePassword').onclick=randomPassword;$('showPassword').onclick=()=>{const show=$('password').type==='password';$('password').type=show?'text':'password';$('showPassword').textContent=show?'隐藏':'显示';};
-$('credentials').onsubmit=run(async()=>{const id=$('editingId').value,password=$('password').value;const created=await manage({action:'credentials',userId:id,username:$('username').value,password,...(!id&&$('createGroup').value?{groupId:$('createGroup').value}:{})});$('memberDialog').close();let refreshFailed=false;try{await refresh();}catch{refreshFailed=true;}notice((id?'新密码已保存；原 API Key 不变。':($('createGroup').value?'成员已创建并加入分组。':'成员已创建，尚未入组，请到分组页设置份额。'))+(refreshFailed?' 页面刷新失败，请稍后手动刷新。':''),refreshFailed);try{await delivery({id:created.id,username:created.username},password);}catch{notice('账户已保存，但分发信息读取失败。可在该成员行重新打开分发信息；如未保存密码，请重置。',true);}});
-$('copyDelivery').onclick=run(async()=>{await navigator.clipboard.writeText($('deliveryText').value);notice('已复制这一位成员的登录与 API 配置。');});
-$('resetDraft').onclick=()=>{renderDraft();notice('未保存的分组修改已撤销。');};$('redistribute').onchange=()=>{redistributeByMode[allocationMode]=$('redistribute').checked;markDirty();updateRedistributeHint();};$('previewGroups').onclick=run(previewGroups);
-$('confirmGroups').onclick=run(async()=>{if(!preview)throw new Error('请重新预览');await manage(preview);preview=null;dirty=false;$('previewDialog').close();try{await refresh();}catch{notice('分组已保存，但页面刷新失败，请稍后手动刷新。',true);return;}notice('分组与额度分配已保存。');});
+$('disconnect').onclick=()=>{gallery.reset();tab('membersPanel');sessionStorage.removeItem('nai.adminSession');localStorage.removeItem('nai.adminToken');$('adminToken').value='';$('deliveryText').value='';$('password').value='';$('upstreamPst').value='';document.querySelectorAll('dialog[open]').forEach(d=>d.close());state=null;upstream=null;editing=false;shares={};selectedMember=null;$('dashboard').hidden=true;$('topActions').hidden=true;$('connect').hidden=false;notice('已退出管理。');};
+for(const button of document.querySelectorAll('[data-tab]'))button.onclick=()=>tab(button.dataset.tab);
+for(const button of document.querySelectorAll('[data-close]'))button.onclick=()=>$(button.dataset.close).close();
+$('refresh').onclick=run(async()=>{requireSaved();await refresh();notice('状态已刷新。');});$('search').oninput=()=>{if(state)renderMembers();};
+$('editShares').onclick=run(()=>{editing=true;shareMode=state.shareMode;shares=Object.fromEntries(state.users.map(u=>[u.id,u.quota?.share||0]));renderMembers();});
+$('equalize').onclick=()=>{if(busy)return;shareMode='equal';shares=Object.fromEntries(state.users.map(u=>[u.id,1/state.users.length]));renderMembers();};
+$('cancelShares').onclick=run(async()=>{editing=false;shares={};await refresh();});
+$('saveShares').onclick=run(async()=>{if(!validShares())throw new Error('请把成员份额合计调整为 100%。');await manage({action:'allocation',shareMode,shares,expectedConfigVersion:state.configVersion});editing=false;shares={};try{await refresh();notice('V5 和点数已按新份额分配。');}catch{renderMembers();notice('分配已保存，页面刷新失败；请刷新查看，勿重复提交。',true);}});
+$('newMember').onclick=run(()=>editMember());$('generatePassword').onclick=randomPassword;$('showPassword').onclick=()=>{const show=$('password').type==='password';$('password').type=show?'text':'password';$('showPassword').textContent=show?'隐藏':'显示';};$('newShare').oninput=updateCreateHint;
+$('credentials').onsubmit=run(async()=>{
+  const id=$('editingId').value,password=$('password').value;
+  const created=await manage(id?{action:'credentials',userId:id,username:$('username').value,password}:{action:'create-member',username:$('username').value,...(password?{password}:{}),newMemberShare:Number($('newShare').value)/100,expectedConfigVersion:state.configVersion});$('memberDialog').close();let failed=false;try{await refresh();}catch{failed=true;}
+  notice((id?'密码已更新，原个人 Key 保留。':'成员已创建，V5 和点数已分配。')+(failed?' 页面刷新失败，请稍后刷新。':''),failed);
+  try{await delivery({id:created.id,username:created.username},created.password||password);}catch{notice('账户已保存，分发信息读取失败。请从成员管理重新打开；未保存的密码可重置。',true);}
+});
+$('memberDialog').addEventListener('close',()=>{$('password').value='';});$('deliveryDialog').addEventListener('close',()=>{$('deliveryText').value='';});
+$('copyDelivery').onclick=run(async()=>{await navigator.clipboard.writeText($('deliveryText').value);notice('已复制该成员的登录信息和个人 Key。');});$('deliverMember').onclick=run(async()=>{if(selectedMember){$('manageDialog').close();await delivery(selectedMember);}});$('resetPassword').onclick=run(()=>{if(selectedMember)editMember(selectedMember);});
+$('toggleMember').onclick=run(()=>{const user=selectedMember;if(!user)return;$('manageDialog').close();confirmation((user.enabled?'停用 ':'恢复 ')+memberName(user),user.enabled?'暂停登录和新的生图请求。原个人 Key、份额和余额保留。':'恢复原个人 Key 和登录，继续使用保留的余额。',async()=>{await manage({action:'member-status',userId:user.id,enabled:!user.enabled});$('confirmDialog').close();await refresh();notice('成员状态已更新。');});});
+$('removeMember').onclick=run(()=>{const user=selectedMember;if(!user)return;const q=user.quota||{};$('manageDialog').close();confirmation('删除 '+memberName(user)+'？','登录和个人 Key 会立即失效，历史记录保留。剩余 V5 '+number(q.v5Available)+'% 和订阅点数 '+number(q.anlasFixedAvailable)+(q.anlasPurchasedAvailable>0?'、购买点数 '+number(q.anlasPurchasedAvailable):'')+' 将按其余成员的份额分配。',async()=>{await manage({action:'remove-member',userId:user.id,expectedConfigVersion:state.configVersion});$('confirmDialog').close();selectedMember=null;try{await refresh();notice('成员已删除，剩余额度已分配给其他成员。');}catch{notice('成员已删除，请刷新查看最新名单。',true);}});});
 $('confirmAction').onclick=run(async()=>{if(confirmTask)await confirmTask();});$('confirmDialog').addEventListener('close',()=>{confirmTask=null;});
-$('saveFallback').onclick=run(async()=>{await manage({action:'fallback-policy',enabled:$('autoFallback').checked});state.autoAnlasFallback=$('autoFallback').checked;notice('续用策略已保存，仅影响之后的任务。');});
-$('refreshUpstream').onclick=run(async()=>{requireClean();if(!upstream)throw new Error('未绑定上游');const result=await api('/api/admin/accounts/quota',{ids:[upstream.id]});await refresh();notice(result.failed?'官方查询失败，请检查凭据。':'已向官方刷新额度。',Boolean(result.failed));});
-$('toggleUpstream').onclick=run(async()=>{requireClean();if(!upstream)throw new Error('未绑定上游');const enabled=!upstream.enabled;if(enabled){const r=await api('/api/admin/accounts/quota',{ids:[upstream.id]});if(r.failed)throw new Error('官方查询失败，保持暂停。');}await api('/api/admin/accounts/'+encodeURIComponent(upstream.id),{enabled},'PATCH');await refresh();notice(enabled?'上游已恢复。':'上游已暂停。');});
-$('upstreamCredentials').onsubmit=run(async()=>{requireClean();if(!upstream)throw new Error('未绑定上游');if(upstream.inFlight)throw new Error('请等待在途生成完成。');const token=$('upstreamPst').value.trim();if(!/^pst-[A-Za-z0-9_-]+$/.test(token))throw new Error('请输入完整 PST');await api('/api/admin/accounts/'+encodeURIComponent(upstream.id),{token},'PATCH');$('upstreamPst').value='';await api('/api/admin/accounts/quota',{ids:[upstream.id]});await refresh();notice('PST 已更新，上游保持暂停；确认额度后手动恢复。');});
-window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';}});
+$('saveFallback').onclick=run(async()=>{await manage({action:'fallback-policy',enabled:$('autoFallback').checked});state.autoAnlasFallback=$('autoFallback').checked;notice('设置已保存，之后的请求生效。');});
+$('refreshUpstream').onclick=run(async()=>{requireSaved();await refreshOfficial();await refresh();notice('已向官方刷新额度。');});
+$('syncPeriod').onclick=run(async()=>{requireSaved();await refreshOfficial();await refreshOfficial();await refresh();if(state.subscriptionCycle?.legacyPending){await manage({action:'sync-period',expectedConfigVersion:state.configVersion});await refresh();}notice(state.status==='renewal_pending'?'还有请求在处理，完成后再次刷新即可。':'本期额度已同步。');});
+$('toggleUpstream').onclick=run(async()=>{requireSaved();if(!upstream)throw new Error('尚未绑定官方账号');const enabled=!upstream.enabled;if(enabled)await refreshOfficial();await api('/api/admin/accounts/'+encodeURIComponent(upstream.id),{enabled},'PATCH');await refresh();notice(enabled?'账号已恢复使用。':'账号已暂停使用。');});
+$('upstreamCredentials').onsubmit=run(async()=>{requireSaved();if(!upstream)throw new Error('尚未绑定官方账号');if(upstream.inFlight)throw new Error('请等待正在生成的请求完成。');const token=$('upstreamPst').value.trim();if(!/^pst-[A-Za-z0-9_-]+$/.test(token))throw new Error('请输入完整 PST');await api('/api/admin/accounts/'+encodeURIComponent(upstream.id),{token},'PATCH');$('upstreamPst').value='';await refreshOfficial();await refresh();notice('PST 已更新，账号保持暂停；核验额度后再恢复使用。');});
+window.addEventListener('beforeunload',event=>{if(editing){event.preventDefault();event.returnValue='';}});
 $('adminToken').value=sessionStorage.getItem('nai.adminSession')||localStorage.getItem('nai.adminToken')||'';
-if($('adminToken').value)refresh().catch(()=>notice('请重新连接管理端。',true));
-
-// 空闲时自动刷新；正在编辑分配或打开弹窗时保留用户草稿。
-setInterval(async()=>{if(!state||busy||dirty||document.querySelector('dialog[open]')||document.activeElement?.matches('input,select,textarea'))return;busy=true;try{await refresh();}catch{}finally{busy=false;}},30000);
-
-// 额度只在成员之间转移，删除前单独预览接收者与全部余额。
-let deletePreview=null;
-const resourceNames={v5:'V5 余量',anlasFixed:'订阅 Anlas',anlasPurchased:'购买 Anlas'};
-function sharedMembers(){return state.users.filter(u=>u.quota?.member===true);}
-function fillMemberSelect(id,users){$(id).replaceChildren(...users.map(u=>option(u.id,u.username||u.id)));}
-function openTransfer(u){requireClean();const users=sharedMembers();if(!users.some(v=>v.id===u.id))throw new Error('请先将该成员加入共享分组。');if(users.length<2)throw new Error('至少需要两位共享成员才能转移额度。');fillMemberSelect('transferFrom',users);fillMemberSelect('transferTo',users);$('transferFrom').value=u.id;$('transferTo').value=users.find(v=>v.id!==u.id).id;$('transferAmount').value='';$('transferResource').value='v5';updateTransferHint();modal('transferDialog');}
-function updateTransferHint(){const from=state.users.find(u=>u.id===$('transferFrom').value),to=state.users.find(u=>u.id===$('transferTo').value),resource=$('transferResource').value,amount=Number($('transferAmount').value)||0,before=Number(from?.quota?.[resource+'Available']||0),after=Number(to?.quota?.[resource+'Available']||0);$('transferHint').textContent=(from?.username||'转出者')+'：'+number(before)+' → '+number(before-amount)+'；'+(to?.username||'接收者')+'：'+number(after)+' → '+number(after+amount)+(resource==='v5'?' / 容量 '+number(to?.quota?.v5Capacity):'')+'。总余额保持不变；有排队或运行任务时暂不可操作。';}
-$('transferAmount').oninput=updateTransferHint;
-for(const id of ['transferFrom','transferTo','transferResource'])$(id).onchange=updateTransferHint;
-$('transferForm').onsubmit=run(async()=>{requireClean();const fromUserId=$('transferFrom').value,toUserId=$('transferTo').value,resource=$('transferResource').value,amount=Number($('transferAmount').value);if(fromUserId===toUserId)throw new Error('转出与接收成员不能相同。');if(!Number.isFinite(amount)||amount<=0)throw new Error('请输入大于 0 的转移额度。');await manage({action:'transfer-quota',fromUserId,toUserId,resource,amount,expectedConfigVersion:state.configVersion});$('transferDialog').close();try{await refresh();}catch{notice('额度已转移，但页面刷新失败，请手动刷新，勿重复提交。',true);return;}notice(resourceNames[resource]+' 已转移。');});
-function openDelete(u){requireClean();const recipients=state.users.filter(v=>v.id!==u.id&&(v.quota?.member===true||(u.quota?.member===true&&v.enabled)));if(!recipients.length)throw new Error('没有可接收的其他账户。请创建并启用一个新账户；未分组的新账户也可接替当前共享成员。');$('deleteUserId').value=u.id;$('deleteName').textContent=u.username||u.id;$('deleteRecipient').replaceChildren(...recipients.map(v=>option(v.id,(v.username||v.id)+(v.quota?.member?'':'（未分组，将接替原份额）'))));resetDeletePreview();modal('deleteDialog');}
-function resetDeletePreview(){deletePreview=null;$('deleteShareRows').replaceChildren();$('deleteSharePreview').hidden=true;$('deleteConfirmName').value='';$('deleteSummary').textContent='选择接收账户后预览。余额和原份额全部转交指定成员，其他成员份额不变。未分组的新账户会自动加入原分组。';$('deleteConfirmSection').hidden=true;$('confirmDelete').disabled=true;}
-$('deleteRecipient').onchange=resetDeletePreview;
-$('previewDelete').onclick=run(async()=>{requireClean();const body={action:'preview-delete-member',userId:$('deleteUserId').value,transferToUserId:$('deleteRecipient').value,expectedConfigVersion:state.configVersion};const result=await manage(body);deletePreview={...body,action:'delete-member',expectedConfigVersion:result.configVersion};const name=state.users.find(u=>u.id===body.userId)?.username||body.userId,to=state.users.find(u=>u.id===body.transferToUserId)?.username||body.transferToUserId,q=result.transferred,wasUnassigned=!state.users.find(u=>u.id===body.transferToUserId)?.quota?.member;$('deleteSummary').textContent='将删除成员「'+name+'」，把全部剩余余额和原份额交给「'+to+'」：V5 '+number(q.v5)+'，订阅 Anlas '+number(q.anlasFixed)+'，购买 Anlas '+number(q.anlasPurchased)+'。其他成员份额不变。登录与 API Key 将失效，历史记录保留。接收者 V5 如超过容量，将暂停恢复直到低于容量。';if(wasUnassigned)$('deleteSummary').textContent+=' 新账户将自动加入原分组并继承被删除成员的份额，其他成员的份额不变。';const changes=(result.groups||[]).filter(g=>g.share!==state.groups.find(v=>v.id===g.id)?.share);if(changes.length)$('deleteSummary').textContent+=' 分组份额调整：'+changes.map(g=>g.name+' '+percent(state.groups.find(v=>v.id===g.id)?.share)+' → '+percent(g.share)).join('；')+'。';$('deleteShareRows').replaceChildren();for(const change of result.shareChanges||[]){const user=state.users.find(u=>u.id===change.userId),row=node('tr');row.append(node('td',(user?.username||change.userId)+(change.userId===body.userId?'（删除）':change.userId===body.transferToUserId?'（接收）':'')),node('td',percent(change.beforeShare)),node('td',percent(change.afterShare)));$('deleteShareRows').append(row);}$('deleteSharePreview').hidden=!(result.shareChanges?.length);$('deleteConfirmSection').hidden=false;$('deleteConfirmName').value='';$('confirmDelete').disabled=true;});
-$('deleteConfirmName').oninput=()=>{$('confirmDelete').disabled=!deletePreview||$('deleteConfirmName').value!==$('deleteName').textContent;};
-$('confirmDelete').onclick=run(async()=>{requireClean();if(!deletePreview||$('deleteConfirmName').value!==$('deleteName').textContent)throw new Error('请输入被删除成员的完整用户名确认。');await manage(deletePreview);deletePreview=null;$('deleteDialog').close();try{await refresh();}catch{notice('成员已删除且余额已转交，但页面刷新失败，请手动刷新。',true);return;}notice('成员已删除，全部剩余余额已转交，历史记录已保留。');});
-$('deleteDialog').addEventListener('close',resetDeletePreview);
+if($('adminToken').value){busy=true;refresh().catch(()=>notice('请重新登录管理端。',true)).finally(()=>{busy=false;updateButtons();});}
+setInterval(async()=>{if(!state||busy||editing||document.querySelector('dialog[open]')||document.activeElement?.matches('input,select,textarea'))return;busy=true;try{await refresh();}catch{}finally{busy=false;updateButtons();}},30000);
