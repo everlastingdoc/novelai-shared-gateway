@@ -17,7 +17,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JsonStore, MAX_CACHE_IMAGES_LIMIT, createId, createPublicToken, defaultArtist2_5D, hashObject, legacyDefaultArtist, maskToken, normalizeDb } from './store.js';
+import { JsonStore, MAX_CACHE_IMAGES_LIMIT, createId, createPublicToken, defaultArtist2_5D, hashObject, legacyDefaultArtist, maskToken } from './store.js';
 import { MAX_STEPS, DIRECT_URL_MAX_STEPS, buildErrorImage, fetchNovelAiAccountQuota, generateNovelAiImage, normalizeNovelAiRequest } from './providers.js';
 import { generationPrice, sizeMap } from '../public/generation-pricing.js';
 import { adminPromptApiConfig, convertChinesePrompt, fetchPromptApiModels, isPromptApiConfigured, normalizePromptApiConfig, publicPromptApiConfig } from './prompt-api.js';
@@ -773,9 +773,9 @@ async function handleNativeImageGeneration(req, res, { stream = false } = {}) {
     try {
       // 计价失败必须在入队前返回，不留下无法计价的任务。
       quoteFairRequest(single);
-      const result = await runNativeQueuedRequest(token, single, deadline, diagnosticId);
-      const filename = `image_${index}.${imageExtension(result.saved.mimeType || '')}`;
-      entries.push({buffer: await readStoredImage(result.saved), filename});
+      const { buffer, mimeType } = await runNativeQueuedRequest(token, single, deadline, diagnosticId);
+      const filename = `image_${index}.${imageExtension(mimeType || '')}`;
+      entries.push({ buffer, filename });
       results.push({index, status: 'done', filename});
     } catch (error) {
       if (!entries.length) throw error;
@@ -804,7 +804,10 @@ async function runNativeQueuedRequest(token, request, deadline, diagnosticId) {
   const result = await pending;
   if (!result) { await timeoutJob(job.id); throw httpError(504, 'direct generate timeout'); }
   if (result.error) throw httpError(result.statusCode || (isTimeoutResultMessage(result.error) ? 504 : 500), result.error);
-  return result;
+  return {
+    buffer: result.image?.buffer ?? await readStoredImage(result.saved),
+    mimeType: result.saved.mimeType
+  };
 }
 
 async function handleNativeAuxiliary(req, res, operation) {
@@ -818,8 +821,7 @@ async function handleNativeAuxiliary(req, res, operation) {
   const request = parseNativeAuxiliaryRequest(body, operation);
   request.allowPurchasedAnlas = body.allowPurchasedAnlas === true;
   quoteFairRequest(request);
-  const result = await runNativeQueuedRequest(token, request, Date.now() + openAiChatTimeoutMs, diagnosticId);
-  const buffer = await readStoredImage(result.saved);
+  const { buffer } = await runNativeQueuedRequest(token, request, Date.now() + openAiChatTimeoutMs, diagnosticId);
   // 编码数据保持原始二进制，启动器负责转为 base64；放大保持图片 ZIP 协议。
   if (operation === 'encode-vibe') sendImage(res, 200, 'application/octet-stream', buffer, { 'cache-control': 'no-store' });
   else sendImage(res, 200, 'application/zip', nativeImageZip(buffer), { 'cache-control': 'no-store' });
@@ -1124,204 +1126,6 @@ function absoluteUrl(req, urlPath) {
   return `${proto}://${hostHeader}${urlPath}`;
 }
 
-async function redeemCard(cardCode) {
-  if (!cardCode) throw httpError(400, 'card is required.');
-  return store.update((db) => {
-    const card = db.cards.find((item) => item.code === cardCode);
-    if (!card) throw httpError(404, 'card not found.');
-    if (card.usedBy) throw httpError(409, 'card already redeemed.');
-    if (card.expiresAt && Date.parse(card.expiresAt) < Date.now()) throw httpError(410, 'card expired.');
-
-    const user = {
-      id: createId('usr'),
-      token: createPublicToken('NAI'),
-      balance: Number(card.credits || 0),
-      enabled: true,
-      sourceCard: card.code,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    card.usedBy = user.token;
-    card.usedAt = new Date().toISOString();
-    db.users.unshift(user);
-    db.ledger.unshift({
-      id: createId('log'),
-      type: 'redeem',
-      token: user.token,
-      amount: user.balance,
-      at: new Date().toISOString(),
-      note: `Redeemed card ${card.code}`
-    });
-    return publicUser(user);
-  }, { collections: ['cards', 'users', 'ledger'] });
-}
-
-async function mergeUserBalance(sourceToken, targetToken) {
-  if (!sourceToken) throw httpError(400, '请先输入被融合密钥。');
-  if (!targetToken) throw httpError(400, '请输入需要保留额度的密钥。');
-  if (sourceToken === targetToken) throw httpError(409, '两个密钥不能相同。');
-
-  return store.update((db) => {
-    const source = getUserOrThrow(db, sourceToken);
-    const target = db.users.find((item) => item.token === targetToken);
-    if (!target || target.enabled === false) throw httpError(404, '保留额度的密钥不存在或已被禁用。');
-    if (source.id === target.id) throw httpError(409, '两个密钥不能相同。');
-
-    const activeJob = (db.jobs || []).find((job) => (
-      job.userToken === source.token && ['queued', 'running'].includes(job.status)
-    ));
-    if (activeJob) throw httpError(409, '当前密钥还有任务正在生成，完成后再融合。');
-
-    const amount = Number(source.balance || 0);
-    if (!Number.isFinite(amount) || amount <= 0) throw httpError(409, '被融合密钥没有可融合额度。');
-
-    const now = new Date().toISOString();
-    target.balance = Math.max(0, Number(target.balance || 0)) + amount;
-    target.updatedAt = now;
-    source.balance = 0;
-    source.enabled = false;
-    source.mergedInto = target.token;
-    source.mergedAt = now;
-    source.mergedAmount = amount;
-    source.updatedAt = now;
-    target.mergedFrom = mergedFromEntries(target.mergedFrom);
-    target.mergedFrom = [
-      { token: source.token, amount, at: now },
-      ...target.mergedFrom.filter((entry) => entry.token !== source.token)
-    ].slice(0, 200);
-
-    const mergeInLog = {
-      id: createId('log'),
-      type: 'merge-in',
-      token: target.token,
-      amount,
-      at: now,
-      note: `Merged balance from ${maskToken(source.token)}`
-    };
-    const mergeOutLog = {
-      id: createId('log'),
-      type: 'merge-out',
-      token: source.token,
-      amount: -amount,
-      at: now,
-      note: `Merged balance into ${maskToken(target.token)}`
-    };
-    db.ledger.unshift(mergeInLog, mergeOutLog);
-
-    return {
-      amount,
-      source: publicUser(source),
-      target: publicUser(target),
-      ledgerIds: [mergeInLog.id, mergeOutLog.id]
-    };
-  }, {
-    collections: ['users', 'ledger'],
-    dirtyRows: (result) => ({
-      users: [result?.source?.id, result?.target?.id],
-      ledger: result?.ledgerIds || []
-    }),
-    immediate: true
-  });
-}
-
-async function createCards(body) {
-  const count = clamp(Number(body.count || 1), 1, 200);
-  const credits = clamp(Number(body.credits || 10), 1, 100000);
-  const prefix = String(body.prefix || 'CARD').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16) || 'CARD';
-  const cards = Array.from({ length: count }, () => ({
-    id: createId('card'),
-    code: createPublicToken(prefix),
-    credits,
-    note: String(body.note || ''),
-    createdAt: new Date().toISOString(),
-    expiresAt: body.expiresAt || ''
-  }));
-
-  await store.update((db) => {
-    db.cards.unshift(...cards);
-  }, { collections: ['cards'] });
-  return cards;
-}
-
-async function createUsers(body) {
-  const count = clamp(Number(body.count || 1), 1, 200);
-  const credits = clamp(Number(body.credits || 10), 1, 100000);
-  const note = String(body.note || 'admin issued').slice(0, 120);
-  const users = Array.from({ length: count }, () => ({
-    id: createId('usr'),
-    token: createPublicToken('NAI'),
-    balance: credits,
-    enabled: true,
-    sourceCard: '',
-    note,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  }));
-
-  await store.update((db) => {
-    db.users.unshift(...users);
-    users.forEach((user) => {
-      db.ledger.unshift({
-        id: createId('log'),
-        type: 'issue',
-        token: user.token,
-        amount: credits,
-        at: new Date().toISOString(),
-        note
-      });
-    });
-  }, { collections: ['users', 'ledger'] });
-  return users;
-}
-
-async function adjustUsers(body) {
-  const setBalance = body.setBalance === undefined ? null : clamp(Number(body.setBalance), 0, 100000000);
-  const delta = body.delta === undefined && body.balanceDelta === undefined ? null : Number(body.delta ?? body.balanceDelta);
-  if (setBalance === null && !Number.isFinite(delta)) throw httpError(400, 'setBalance or delta is required.');
-
-  return store.update((db) => {
-    const users = selectUsers(db, body);
-    const now = new Date().toISOString();
-    users.forEach((user) => {
-      const before = Number(user.balance || 0);
-      user.balance = setBalance === null ? Math.max(0, before + delta) : setBalance;
-      user.updatedAt = now;
-      db.ledger.unshift({
-        id: createId('log'),
-        type: 'adjust',
-        token: user.token,
-        amount: user.balance - before,
-        at: now,
-        note: String(body.note || 'admin balance adjustment').slice(0, 160)
-      });
-    });
-    return users;
-  }, { collections: ['users', 'ledger'] });
-}
-
-async function deleteUsers(body) {
-  return store.update((db) => {
-    const users = selectUsers(db, body);
-    const ids = new Set(users.map((user) => user.id));
-    const tokens = new Set(users.map((user) => user.token));
-    db.users = db.users.filter((user) => !ids.has(user.id));
-    db.cards.forEach((card) => {
-      if (tokens.has(card.usedBy)) {
-        card.usedBy = '';
-        card.usedAt = '';
-      }
-    });
-    db.ledger.unshift({
-      id: createId('log'),
-      type: 'delete-users',
-      amount: 0,
-      at: new Date().toISOString(),
-      note: `Deleted ${users.length} user token(s)`
-    });
-    return { deleted: users.length };
-  }, { collections: ['users', 'cards', 'ledger'] });
-}
-
 async function addAccount(body) {
   const token = String(body.token || '').trim();
   if (!token) throw httpError(400, 'NovelAI account token is required.');
@@ -1356,109 +1160,6 @@ async function addAccount(body) {
   }, { collections: ['accounts'] });
 }
 
-async function importAccounts(body) {
-  const mode = body.mode === 'replace' ? 'replace' : 'append';
-  const accounts = parseImportedAccounts(body);
-  if (!accounts.length) throw httpError(400, 'no account tokens found.');
-
-  return store.update((db) => {
-    const now = new Date().toISOString();
-    const imported = accounts.map((account, index) => ({
-      id: account.id || createId('acct'),
-      routeId: Number(account.routeId || 0),
-      name: String(account.name || `NovelAI imported ${index + 1}`).slice(0, 80),
-      token: String(account.token || '').trim(),
-      proxyUrl: normalizeAccountProxyUrl(account.proxyUrl || account.socksProxy || account.proxy || ''),
-      enabled: account.enabled !== false,
-      weight: clamp(Number(account.weight || 1), 1, 100),
-      inFlight: 0,
-      total: Number(account.total || 0),
-      failures: Number(account.failures || 0),
-      quotaPoints: numberOrNull(account.quotaPoints),
-      quotaFixed: numberOrNull(account.quotaFixed),
-      quotaPurchased: numberOrNull(account.quotaPurchased),
-      quotaTier: account.quotaTier ?? null,
-      v5UsagePercent: numberOrNull(account.v5UsagePercent),
-      v5UsageIsNegative: Boolean(account.v5UsageIsNegative),
-      v5UsageTimeUntilNextPercent: numberOrNull(account.v5UsageTimeUntilNextPercent),
-      quotaCheckedAt: account.quotaCheckedAt || '',
-      quotaError: account.quotaError || '',
-      cooldownUntil: '',
-      createdAt: account.createdAt || now,
-      updatedAt: now,
-      lastUsedAt: account.lastUsedAt || ''
-    }));
-
-    if (mode === 'replace') {
-      db.accounts = imported;
-    } else {
-      const existingTokens = new Set(db.accounts.map((account) => account.token));
-      imported.forEach((account) => {
-        if (!existingTokens.has(account.token)) {
-          db.accounts.unshift(account);
-          existingTokens.add(account.token);
-        }
-      });
-    }
-    assignAccountRouteIds(db.accounts);
-
-    db.ledger.unshift({
-      id: createId('log'),
-      type: 'import-accounts',
-      amount: imported.length,
-      at: now,
-      note: `${mode} account import`
-    });
-    return db.accounts;
-  }, { collections: ['accounts', 'ledger'] });
-}
-
-async function applyAccountProxies(body) {
-  const proxies = parseProxyLines(body.proxies || body.proxyText || body.text || body.proxy || '');
-  if (!proxies.length) throw httpError(400, 'no SOCKS5 proxies found.');
-  return store.update((db) => {
-    const ids = new Set(collectValues(body.ids || body.accounts));
-    const accounts = ids.size ? db.accounts.filter((account) => ids.has(account.id)) : db.accounts;
-    if (!accounts.length) throw httpError(ids.size ? 404 : 400, ids.size ? 'no matching accounts found.' : 'no accounts found.');
-    const now = new Date().toISOString();
-    const applied = Math.min(accounts.length, proxies.length);
-    for (let index = 0; index < applied; index += 1) {
-      accounts[index].proxyUrl = proxies[index];
-      accounts[index].updatedAt = now;
-    }
-    db.ledger.unshift({
-      id: createId('log'),
-      type: 'apply-account-proxies',
-      amount: applied,
-      at: now,
-      note: `Applied ${applied} SOCKS5 proxy setting(s)`
-    });
-    return {
-      applied,
-      proxies: proxies.length,
-      accounts: accounts.slice(0, applied)
-    };
-  }, { collections: ['accounts', 'ledger'] });
-}
-
-async function deleteAccounts(body) {
-  return store.update((db) => {
-    const ids = new Set(collectValues(body.ids || body.accounts));
-    if (!ids.size) throw httpError(400, 'account ids are required.');
-    const before = db.accounts.length;
-    db.accounts = db.accounts.filter((account) => !ids.has(account.id));
-    const deleted = before - db.accounts.length;
-    db.ledger.unshift({
-      id: createId('log'),
-      type: 'delete-accounts',
-      amount: deleted,
-      at: new Date().toISOString(),
-      note: `Deleted ${deleted} NovelAI account(s)`
-    });
-    return { deleted };
-  }, { collections: ['accounts', 'ledger'] });
-}
-
 async function updateAccounts(body) {
   return store.update((db) => {
     const ids = new Set(collectValues(body.ids || body.accounts));
@@ -1479,32 +1180,6 @@ async function updateAccounts(body) {
       note: body.enabled === undefined ? `Updated ${accounts.length} account(s)` : `${body.enabled ? 'Enabled' : 'Disabled'} ${accounts.length} account(s)`
     });
     return accounts;
-  }, { collections: ['accounts', 'ledger'] });
-}
-
-async function resetAccountStats(body) {
-  return store.update((db) => {
-    const ids = new Set(collectValues(body.ids || body.accounts));
-    if (!ids.size) throw httpError(400, 'account ids are required.');
-    const accounts = db.accounts.filter((account) => ids.has(account.id));
-    if (!accounts.length) throw httpError(404, 'no matching accounts found.');
-    const now = new Date().toISOString();
-    accounts.forEach((account) => {
-      account.inFlight = 0;
-      account.total = 0;
-      account.failures = 0;
-      account.cooldownUntil = '';
-      account.lastUsedAt = '';
-      account.updatedAt = now;
-    });
-    db.ledger.unshift({
-      id: createId('log'),
-      type: 'reset-account-stats',
-      amount: accounts.length,
-      at: now,
-      note: `Reset monitoring stats for ${accounts.length} NovelAI account(s)`
-    });
-    return { reset: accounts.length };
   }, { collections: ['accounts', 'ledger'] });
 }
 
@@ -1581,40 +1256,6 @@ async function refreshEnabledAccountQuotas() {
   } finally {
     accountQuotaRefreshPromise = null;
   }
-}
-
-async function testAccount(id) {
-  const db = await store.readCollections(['settings', 'accounts']);
-  const target = db.accounts.find((account) => account.id === id);
-  if (!target) throw httpError(404, 'account not found.');
-
-  const now = new Date().toISOString();
-  let result;
-  try {
-    const quota = await fetchNovelAiAccountQuotaWithTimeout(target.token, target.proxyUrl);
-    result = accountQuotaResult(target.id, quota, now);
-  } catch (error) {
-    result = accountQuotaErrorResult(target.id, error, now);
-  }
-
-  const account = await store.update((writeDb) => {
-    const item = writeDb.accounts.find((entry) => entry.id === id);
-    if (!item) throw httpError(404, 'account not found.');
-    applyAccountQuotaResult(item, result, now);
-    return item;
-  }, { collections: ['accounts'] });
-  const availability = accountAvailability(account, db.settings);
-  const ok = Boolean(result.ok);
-  const available = ok && availability.available;
-
-  return {
-    ok,
-    available,
-    message: accountTestMessage(result, availability),
-    checkedAt: now,
-    availability,
-    account: publicAccount(account, { revealToken: true })
-  };
 }
 
 function accountQuotaResult(id, quota, now) {
@@ -1695,51 +1336,6 @@ function applyAccountQuotaResult(account, result, now) {
   account.updatedAt = now;
 }
 
-function accountAvailability(account, settings = {}) {
-  const now = Date.now();
-  const maxConcurrency = maxAccountConcurrency(settings, account);
-  const inFlight = Number(account.inFlight || 0);
-  const cooldownUntilMs = Date.parse(account.cooldownUntil || '');
-  const coolingDown = Number.isFinite(cooldownUntilMs) && cooldownUntilMs > now;
-  const quotaPoints = accountQuotaPoints(account);
-  const enabled = account.enabled !== false;
-  const hasSlot = inFlight < maxConcurrency;
-  const standardAvailable = enabled && !coolingDown && hasSlot
-    && (!isUnsubscribedAccountTier(account.quotaTier) || hasUsableImageTrial(account));
-  const highResolutionAvailable = standardAvailable && hasPaidQuota(account);
-
-  return {
-    enabled,
-    coolingDown,
-    cooldownUntil: coolingDown ? account.cooldownUntil : '',
-    inFlight,
-    maxConcurrency,
-    hasSlot,
-    quotaPoints,
-    available: standardAvailable,
-    standardAvailable,
-    highResolutionAvailable
-  };
-}
-
-function accountTestMessage(result, availability) {
-  if (result.disableAccount && !result.ok) return `测试失败：${result.disableReason || '账号不可用'}，已自动禁用`;
-  if (!result.ok) return `测试失败：${result.quotaError || '账号不可用'}`;
-  const quotaText = availability.quotaPoints === null ? '点数未知' : `剩余 ${availability.quotaPoints} 点`;
-  const v5UsageText = result.v5UsagePercent === null
-    ? 'V5额度未知'
-    : result.v5UsageIsNegative
-      ? 'V5额度已耗尽'
-      : `V5剩余 ${result.v5UsagePercent}%`;
-  const accountText = `${quotaText}，${accountTierText(result.quotaTier, '会员未知')}，${v5UsageText}`;
-  if (result.disableAccount) return `测试通过：${result.disableReason || '账号不可用'}，已自动禁用（${accountText}）`;
-  if (!availability.enabled) return `测试通过：Token 有效，但这个账号已禁用（${accountText}）`;
-  if (availability.coolingDown) return `测试通过：Token 有效，但账号正在冷却中（${accountText}）`;
-  if (!availability.hasSlot) return `测试通过：Token 有效，但账号当前并发已满（${accountText}）`;
-  if (!availability.highResolutionAvailable) return `测试通过：普通生成可用，2K/4K 点数不足（${accountText}）`;
-  return `测试通过：账号当前可用（${accountText}）`;
-}
-
 function accountTierText(tier, fallback = '会员未查询') {
   if (tier === null || tier === undefined || tier === '') return fallback;
   const value = Number(tier);
@@ -1797,18 +1393,6 @@ async function mapLimit(items, limit, mapper) {
   });
   await Promise.all(workers);
   return results;
-}
-
-async function clearImageCache(body) {
-  const ids = collectValues(body.ids || body.images);
-  const query = String(body.q || body.query || '').trim().toLowerCase();
-  const clearAll = body.all === true || body.mode === 'all';
-  if (!clearAll && !ids.length && !query) throw httpError(400, 'cache clear target is required.');
-
-  const result = await store.clearCachedImages({ ...body, ids, q: query, all: clearAll });
-  await removeStoredImages(result.images || []);
-  delete result.images;
-  return result;
 }
 
 async function clearRequestLogs() {
@@ -2019,58 +1603,6 @@ function normalizeCacheImageLimit(value) {
   return Math.max(0, Math.min(MAX_CACHE_IMAGES_LIMIT, Math.floor(number)));
 }
 
-async function importPackage(body) {
-  const mode = body.mode === 'merge' ? 'merge' : 'replace';
-  const payload = body.data || body.package || body;
-  if (!payload || typeof payload !== 'object') throw httpError(400, 'import package is required.');
-  const incoming = normalizeDb(sanitizeMigrationData(payload));
-
-  if (mode === 'replace') {
-    const safeDb = normalizeDb({
-      ...incoming,
-      jobs: [],
-      images: [],
-      ledger: []
-    });
-    safeDb.accounts = safeDb.accounts.map((account) => ({ ...account, inFlight: 0 }));
-    assignAccountRouteIds(safeDb.accounts);
-    await store.write(safeDb);
-    await cleanupImageStorage();
-    return {
-      mode,
-      users: safeDb.users.length,
-      accounts: safeDb.accounts.length,
-      images: safeDb.images.length
-    };
-  }
-
-  let trimmedImages = [];
-  const result = await store.update((db) => {
-    db.settings = {
-      ...db.settings,
-      ...incoming.settings,
-      defaults: {
-        ...(db.settings.defaults || {}),
-        ...(incoming.settings.defaults || {})
-      }
-    };
-    db.cards = mergeById(db.cards, incoming.cards);
-    db.users = mergeById(db.users, incoming.users);
-    db.accounts = mergeById(db.accounts, incoming.accounts).map((account) => ({ ...account, inFlight: 0 }));
-    return {
-      mode,
-      users: db.users.length,
-      accounts: db.accounts.length,
-      images: db.images.length
-    };
-  }, {
-    collections: ['settings', 'cards', 'users', 'accounts']
-  });
-  trimmedImages = await store.trimImageCache(null, { force: true });
-  await removeStoredImages(trimmedImages);
-  return result;
-}
-
 async function updateAccount(id, body) {
   return store.update((db) => {
     const account = db.accounts.find((item) => item.id === id);
@@ -2142,15 +1674,6 @@ function dirtyJobListRows(result = {}, db = {}) {
     mergeDirtyRows(rows, dirtyJobMutationRows({ jobId }, db));
   }
   return rows;
-}
-
-function dirtyCreditReservationRows(result) {
-  const reservation = result?.reservation || result || {};
-  return {
-    ...(reservation.userId ? { users: [reservation.userId] } : {}),
-    ...(reservation.account?.id ? { accounts: [reservation.account.id] } : {}),
-    ...(reservation.ledgerId ? { ledger: [reservation.ledgerId] } : {})
-  };
 }
 
 function mergeDirtyRows(target, source = {}) {
@@ -2303,21 +1826,6 @@ async function createDirectJob(token, request, cacheKey, options = {}) {
   }, {
     dirtyRows: dirtyResultJobRows
   });
-}
-
-async function markDirectJobRunning(jobId, reservation) {
-  await store.update((db) => {
-    const job = db.jobs.find((item) => item.id === jobId);
-    if (!job) return;
-    job.status = 'running';
-    job.accountId = reservation.account?.id || '';
-    job.cost = Number(reservation.cost || 0);
-    job.accountCost = Number(reservation.accountCost || 0);
-    job.completedAt = '';
-    job.error = '';
-    job.errorDetail = '';
-    job.updatedAt = new Date().toISOString();
-  }, { collections: ['jobs'], dirtyRows: dirtyJobRows(jobId) });
 }
 
 async function markDirectJobFailed(jobId, message) {
@@ -2805,80 +2313,6 @@ async function requeueReservedJob(reservation, error) {
   }, { dirtyRows: dirtyReservationJobRows(reservation) });
   scheduleQueueDrain(delay);
   clearJobStreamProgress(reservation.job?.id);
-}
-
-async function reserveCreditAndAccount(token, request, cacheKey) {
-  if (fairShareMode) throw httpError(409, '共享生图必须通过统一排队账本');
-  return store.update((db) => {
-    const user = getUserOrThrow(db, token);
-    const cost = generationCost(request);
-    if (user.balance < cost) throw httpError(402, insufficientBalanceMessage);
-    const account = selectAccount(db.accounts, db.settings, { request });
-    if (!account && hasEnabledAccounts(db.accounts)) {
-      if (!hasAccountWithEnoughQuota(db.accounts, request)) throw httpError(503, '无符合本次参数的可用额度；试用限总像素1048576、28步以内');
-      throw httpError(429, 'all NovelAI accounts are busy, retry shortly.');
-    }
-    if (account) {
-      account.inFlight = Number(account.inFlight || 0) + 1;
-      account.lastUsedAt = new Date().toISOString();
-    }
-    user.balance -= cost;
-    user.updatedAt = new Date().toISOString();
-    const ledger = {
-      id: createId('log'),
-      type: 'charge',
-      token,
-      accountId: account?.id || '',
-      amount: -cost,
-      at: new Date().toISOString()
-    };
-    db.ledger.unshift(ledger);
-    return { token, userId: user.id, account: account ? { ...account } : null, ledgerId: ledger.id, cost, accountCost: 0, cacheKey };
-  }, {
-    dirtyRows: dirtyCreditReservationRows
-  });
-}
-
-async function reserveCreditAndAccountWhenAvailable(token, request, cacheKey, deadline) {
-  while (Date.now() < deadline) {
-    const result = await tryReserveCreditAndAccount(token, request, cacheKey);
-    if (!result.busy) return result.reservation;
-    await sleep(Math.min(750, Math.max(50, deadline - Date.now())));
-  }
-  return null;
-}
-
-async function tryReserveCreditAndAccount(token, request, cacheKey) {
-  if (fairShareMode) throw httpError(409, '共享生图必须通过统一排队账本');
-  return store.update((db) => {
-    const user = getUserOrThrow(db, token);
-    const cost = generationCost(request);
-    if (user.balance < cost) throw httpError(402, insufficientBalanceMessage);
-    const account = selectAccount(db.accounts, db.settings, { request });
-    if (!account && hasEnabledAccounts(db.accounts)) {
-      if (!hasAccountWithEnoughQuota(db.accounts, request)) throw httpError(503, '无符合本次参数的可用额度；试用限总像素1048576、28步以内');
-      return { busy: true };
-    }
-    if (account) {
-      account.inFlight = Number(account.inFlight || 0) + 1;
-      account.lastUsedAt = new Date().toISOString();
-    }
-    user.balance -= cost;
-    user.updatedAt = new Date().toISOString();
-    const ledger = {
-      id: createId('log'),
-      type: 'charge',
-      token,
-      accountId: account?.id || '',
-      amount: -cost,
-      at: new Date().toISOString()
-    };
-    db.ledger.unshift(ledger);
-    return { busy: false, reservation: { token, userId: user.id, account: account ? { ...account } : null, ledgerId: ledger.id, cost, accountCost: 0, cacheKey } };
-  }, {
-    dirtyRows: dirtyCreditReservationRows,
-    shouldPersist: (result) => !result?.busy
-  });
 }
 
 async function completeGeneration(reservation, request, image, meta = {}) {
@@ -3556,18 +2990,6 @@ function imageExtension(mimeType = '') {
   return 'png';
 }
 
-function sanitizeMigrationData(payload) {
-  return {
-    settings: payload.settings || {},
-    cards: Array.isArray(payload.cards) ? payload.cards : [],
-    users: Array.isArray(payload.users) ? payload.users : [],
-    accounts: Array.isArray(payload.accounts) ? payload.accounts : [],
-    jobs: [],
-    images: [],
-    ledger: []
-  };
-}
-
 function publicJob(job, db = null) {
   const queue = db?.queue || store.jobQueueProgress(job);
   const request = job.request || {};
@@ -4025,47 +3447,6 @@ function isAbortError(error) {
   return error?.name === 'AbortError' || /aborted|abort/i.test(String(error?.message || ''));
 }
 
-function selectUsers(db, body) {
-  if (body.zeroBalance === true) {
-    const users = db.users.filter((user) => Number(user.balance || 0) <= 0 && !user.mergedInto && !user.mergedAt && !user.mergedFrom?.length);
-    if (!users.length) throw httpError(404, '没有可清理的 0 额度密钥。');
-    return users;
-  }
-  const ids = new Set(collectValues(body.ids || body.users));
-  const tokens = new Set(collectValues(body.tokens || body.token));
-  if (!ids.size && !tokens.size) throw httpError(400, 'user ids or tokens are required.');
-  const users = db.users.filter((user) => ids.has(user.id) || tokens.has(user.token));
-  if (!users.length) throw httpError(404, 'no matching user tokens found.');
-  return users;
-}
-
-function parseImportedAccounts(body) {
-  if (Array.isArray(body.accounts)) {
-    return body.accounts
-      .map((account) => (typeof account === 'string' ? { token: account } : account))
-      .filter((account) => String(account?.token || '').trim());
-  }
-
-  const text = String(body.tokens || body.tokenText || body.text || '').trim();
-  if (!text) return [];
-  return text
-    .split(/\r?\n/)
-    .map((line, index) => line.trim())
-    .filter(Boolean)
-    .map((line, index) => {
-      const parts = line.includes(',') ? line.split(',').map((part) => part.trim()) : ['', line, '', ''];
-      const [name, token, third, fourth] = parts;
-      const proxyUrl = looksLikeProxyUrl(third) ? third : '';
-      const weight = proxyUrl ? fourth : third;
-      return {
-        name: name || `NovelAI imported ${index + 1}`,
-        token: token || line,
-        proxyUrl,
-        weight: weight ? Number(weight) : 1
-      };
-    });
-}
-
 function normalizeAccountProxyUrl(value = '') {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -4086,14 +3467,6 @@ function normalizeAccountProxyUrl(value = '') {
   return url.toString();
 }
 
-function parseProxyLines(value = '') {
-  return String(value || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => normalizeAccountProxyUrl(line));
-}
-
 function parseHostPortUserPassProxy(value = '') {
   const parts = String(value || '').trim().split(':');
   if (parts.length !== 4) return '';
@@ -4103,11 +3476,6 @@ function parseHostPortUserPassProxy(value = '') {
   url.username = username;
   url.password = password;
   return url.toString();
-}
-
-function looksLikeProxyUrl(value = '') {
-  const text = String(value || '').trim();
-  return Boolean(text && (/^(sock5|socks5h?):\/\//i.test(text) || /^[^:@\s]+:\d{2,5}$/i.test(text) || /^[^:\s]+:\d{2,5}:[^:\s]+:.+/.test(text)));
 }
 
 function maskProxyUrl(value = '') {
@@ -4121,16 +3489,6 @@ function maskProxyUrl(value = '') {
   } catch {
     return text.replace(/:\/\/([^:@]+):([^@]+)@/, '://$1:******@');
   }
-}
-
-function mergeById(current, incoming) {
-  const map = new Map();
-  current.forEach((item) => map.set(item.id || createId('item'), item));
-  incoming.forEach((item) => {
-    const key = item.id || createId('item');
-    map.set(key, { ...map.get(key), ...item, id: key });
-  });
-  return Array.from(map.values());
 }
 
 function publicRuntimeSettings(settings = {}) {

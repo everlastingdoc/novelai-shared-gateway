@@ -19,7 +19,7 @@ for (const patch of [{action:'img2img'}, {model:'unknown'}, {parameters:{...inpu
   assert.throws(() => context.parseNativeImageRequest({...input,...patch}), error => error.statusCode===422);
 }
 assert.throws(() => context.parseNativeImageRequest({...input,input:''}), error => error.statusCode===400);
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1kAAAAASUVORK5CYII=', 'base64');
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
 const zip = context.nativeImageZip(png);
 assert.equal(zip.readUInt32LE(0),0x04034b50); assert.equal(zip.readUInt16LE(8),0);
 const filenameLength = zip.readUInt16LE(26);
@@ -42,11 +42,23 @@ form.append('request',new Blob([JSON.stringify(input)],{type:'application/json'}
 const encoded=new Response(form);
 const multipart=Readable.from([Buffer.from(await encoded.arrayBuffer())]);
 multipart.headers={'content-type':encoded.headers.get('content-type')}; multipart.token='NAI-test';
+// Fresh results already contain the bytes that were persisted before settlement.
+context.waitForJobResult = async () => ({ saved: { mimeType: 'image/png' }, image: { buffer: png } });
+context.readStoredImage = () => assert.fail('A fresh Native result must not read back its file');
 const multipartResponse={setHeader:()=>{}};
 await context.handleNativeImageGeneration(multipart,multipartResponse);
 assert.equal(submitted.request.steps,35); assert.equal(submitted.request.prompt,'a cat');
 assert.deepEqual(submitted.request.nativeParameters.v4_prompt,input.parameters.v4_prompt);
 assert.equal(multipartResponse.status,200); assert.deepEqual(multipartResponse.buffer,response.buffer);
+for (const operation of ['encode-vibe', 'upscale']) {
+  const body = { image: png.toString('base64') };
+  if (operation === 'encode-vibe') body.model = input.model;
+  const res = { setHeader() {} };
+  await context.handleNativeAuxiliary({ token: 'NAI-test', headers: jsonHeaders, body }, res, operation);
+  assert.equal(res.status, 200);
+  assert.equal(res.mime, operation === 'encode-vibe' ? 'application/octet-stream' : 'application/zip');
+  assert.deepEqual(res.buffer, operation === 'encode-vibe' ? png : zip);
+}
 context.waitForJobResult=async()=>({error:'mock provider failure'});
 context.isTimeoutResultMessage=()=>false;
 await assert.rejects(context.handleNativeImageGeneration({token:'NAI-test',headers:jsonHeaders,body:input},{setHeader:()=>{}}),e=>e.statusCode===500);
@@ -88,7 +100,7 @@ for (const failAt of [0, 2]) {
   };
   context.waitForJobResult = async () => {
     completedWaits++;
-    return completedWaits === failAt ? {error:'synthetic batch failure', statusCode:502} : {saved:{mimeType:'image/png'}};
+    return completedWaits === failAt ? {error:'synthetic batch failure', statusCode:502} : {saved:{mimeType:'image/png'}, image:{buffer:png}};
   };
   const res = {setHeader() {}};
   await context.handleNativeImageGeneration({token:'NAI-test',headers:jsonHeaders,body:{...input,parameters:{...input.parameters,n_samples:3}}},res);
@@ -101,6 +113,7 @@ for (const failAt of [0, 2]) {
   assert.equal(summary.completed,failAt ? 1 : 3);
   assert.equal(summary.remaining,failAt ? 2 : 0);
   assert.equal(files.size,summary.completed + 1);
+  for (let i = 0; i < summary.completed; i++) assert.deepEqual(files.get(`image_${i}.png`), png);
   assert.equal(res.headers['X-Nai-Image-Count'],String(summary.completed));
   assert.equal(res.headers['X-Nai-Partial'],String(Boolean(failAt)));
 }
