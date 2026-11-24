@@ -1,35 +1,345 @@
-#galleryPanel .cards{margin-top:0}
-#galleryPanel .cards strong{font-size:25px}
-#galleryPanel .gallery-settings{display:flex;gap:18px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #2d3e56;padding-bottom:20px;margin-bottom:20px}
-#galleryPolicyForm{display:flex;align-items:end;gap:12px;max-width:none}
-#galleryPolicyForm label{margin:0}
-#galleryDays{width:140px}
-.gallery-filters{display:flex;gap:12px;align-items:end;flex-wrap:wrap;max-width:none;margin:22px 0 16px}
-.gallery-filters label{margin:0}
-.gallery-filters input,.gallery-filters select{width:auto}
-.gallery-filters .gallery-key-filter{flex:1;min-width:200px}
-.gallery-key-filter select{width:100%}
-.gallery-selection{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-.gallery-selection label{margin:0}
-.gallery-grid{display:flex;flex-direction:column;gap:10px;margin:18px 0}
-.gallery-grid .gallery-card{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:14px;padding:12px;min-width:0}
-.gallery-card .gallery-card-select{margin:0;padding:8px 0}
-.gallery-card-select input{margin:0}
-.gallery-card-details{min-width:0}
-.gallery-card p{font-size:12px;margin:4px 0;overflow-wrap:anywhere}
-.gallery-image{display:block;max-width:100%;padding:0;background:transparent;color:#a8ceff;text-align:left;overflow-wrap:anywhere;font-family:monospace}
-.gallery-image:hover:not(:disabled){text-decoration:underline}
-.gallery-image:disabled{cursor:default}
-.gallery-card button.danger{margin:0;white-space:nowrap}
-.gallery-paging{justify-content:center;gap:16px}
-#galleryImageDialog{width:min(1000px,94vw)}
-#galleryImageTitle{overflow-wrap:anywhere}
-#galleryFullImage{display:block;width:100%;height:auto;max-height:60vh;object-fit:contain;background:#0a101a}
-#galleryImageLoading{margin:18px 0}
-#galleryImageRetry{margin-bottom:16px}
-#galleryPrompt{min-height:110px;max-height:250px}
-#galleryConfirmKeys{padding-left:20px;color:#adbed5}
-#galleryConfirmAction{background:#f1a6a6}
-#galleryConfirmTitle{font-size:20px}
-@media(max-width:850px){.gallery-filters{gap:10px}.gallery-filters label{flex:1;min-width:140px}.gallery-filters input{width:100%}}
-@media(max-width:480px){.gallery-grid .gallery-card{gap:10px}.gallery-card button.danger{grid-column:2;justify-self:start}#galleryPolicyForm{flex-wrap:wrap}.gallery-selection button{width:100%}}
+/* ==========================================================================
+   Admin Gallery & Storage Styles
+   Built on top of the Studio Dark Design System (/members.css)
+   ========================================================================== */
+
+.gallery-top {
+  margin-bottom: -4px;
+}
+
+.gallery-kpis {
+  margin: 0;
+}
+
+.gallery-kpis .kpi-value {
+  font-size: 1.55rem;
+}
+
+/* Compact Retention Policy Bar */
+.gallery-policy-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px 20px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+}
+
+.gallery-policy-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+}
+
+.inline-field > span {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.inline-field input {
+  width: 96px;
+  margin-top: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.gallery-policy-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Collapsible Key Breakdown */
+.gallery-keys-details {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 20px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), var(--shadow-sm);
+}
+
+.gallery-keys-table {
+  margin-top: 4px;
+}
+
+/* Filter & Selection Controls */
+.gallery-browser {
+  gap: 14px;
+}
+
+.gallery-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gallery-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.gallery-filter-field select,
+.gallery-filter-field input {
+  margin-top: 0;
+  width: auto;
+}
+
+.gallery-key-filter {
+  flex: 1 1 220px;
+  min-width: 190px;
+}
+
+.gallery-key-filter select {
+  width: 100%;
+}
+
+.gallery-expired-check {
+  min-height: 34px;
+  padding: 0 4px;
+}
+
+.gallery-selection {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  gap: 10px;
+}
+
+/* Image List Cards */
+.gallery-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gallery-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.gallery-card:hover {
+  border-color: var(--border-strong);
+  background: rgba(22, 28, 43, 0.78);
+}
+
+.gallery-card.is-selected {
+  border-color: var(--accent-border);
+  background: rgba(110, 142, 251, 0.07);
+}
+
+.gallery-card-select {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  cursor: pointer;
+}
+
+.gallery-card-select input {
+  margin: 0;
+}
+
+.gallery-card-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gallery-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.gallery-image {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: auto;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--accent-light);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+.gallery-image:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+  color: #b7c9ff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.gallery-image:disabled {
+  color: var(--text-faint);
+  opacity: 0.75;
+}
+
+.gallery-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px 8px;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.gallery-meta-dot {
+  color: var(--border-strong);
+  user-select: none;
+}
+
+.gallery-paging {
+  justify-content: center;
+  gap: 14px;
+  padding-top: 6px;
+}
+
+/* Confirm Dialog List */
+.gallery-confirm-keys {
+  margin: 12px 0 0;
+  padding: 10px 14px 10px 28px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 0.83rem;
+  line-height: 1.6;
+  max-height: 180px;
+  overflow-y: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Image Viewer Dialog */
+.gallery-viewer-body {
+  gap: 14px;
+}
+
+.gallery-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 220px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.gallery-stage-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.gallery-stage-status.is-error {
+  color: var(--danger);
+}
+
+.gallery-stage-status.is-error .spinner {
+  display: none;
+}
+
+#galleryFullImage {
+  display: block;
+  max-width: 100%;
+  width: auto;
+  height: auto;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: var(--radius-xs);
+}
+
+.gallery-image-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.gallery-prompt-box textarea {
+  min-height: 104px;
+  max-height: 220px;
+  margin-top: 0;
+}
+
+/* Responsive */
+@media (max-width: 820px) {
+  .gallery-filters {
+    align-items: stretch;
+  }
+
+  .gallery-filter-field {
+    flex: 1 1 140px;
+  }
+
+  .gallery-filter-field input,
+  .gallery-filter-field select {
+    width: 100%;
+  }
+
+  .gallery-keys-details {
+    padding: 14px 16px;
+    border-radius: var(--radius-md);
+  }
+}
+
+@media (max-width: 540px) {
+  .gallery-card {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px 12px;
+  }
+
+  .gallery-card > button.danger {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .gallery-selection {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .gallery-selection .toolbar button {
+    flex: 1;
+  }
+}

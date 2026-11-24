@@ -1,7 +1,194 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的额度 · NovelAI 共享</title><link rel="stylesheet" href="/members.css"><script type="module" src="/account.js?v=20261007-base-url"></script></head>
-<body><main><nav><a href="/">共享账户首页</a><span>NovelAI 共享</span></nav>
-<section id="login"><h1>登录你的账户</h1><p>账户由管理员创建。登录后查看个人额度和调用记录。</p><form id="loginForm"><label>用户名<input id="username" autocomplete="username" required maxlength="40"></label><label>密码<input id="password" type="password" autocomplete="current-password" required maxlength="128"></label><button>登录</button></form></section>
-<section id="account" hidden><header><div><h1 id="welcome">我的额度</h1><p id="group"></p></div><button id="logout" class="secondary">退出登录</button></header><p id="status" class="notice"></p>
-<div class="cards"><article><h2>V5 恢复额度</h2><strong id="v5">—</strong><progress id="v5bar" max="100" value="0"></progress><p id="recovery"></p><small>单次消耗为估算值。恢复优先分给未满额成员，个人最多恢复到自己的上限；不用且满额时无法继续积攒。</small></article><article><h2>订阅 Anlas</h2><strong id="fixed">—</strong><p id="fixedHeld"></p></article><article><h2>购买 Anlas</h2><strong id="purchased">—</strong><p id="purchasedHeld"></p><small>需请求明确授权，且官方订阅余额耗尽并完成对账后才能使用。</small></article></div>
-<div class="actions"><button id="refresh" class="secondary">刷新额度</button><button id="showKey" class="secondary">查看我的 API Key</button></div><div id="keyPanel" hidden><label>Base URL<input id="apiBaseUrl" readonly></label><label>我的 API Key<input id="apiKey" readonly type="password"></label><button id="copyKey" class="secondary">复制 Key</button><button id="hideKey" class="secondary">隐藏</button></div>
-<h2>最近 30 条调用</h2><div class="tablewrap"><table><thead><tr><th>时间</th><th>模型</th><th>状态</th><th>额度记录</th></tr></thead><tbody id="jobs"></tbody></table></div><p class="muted">账户、密码和额度分配由管理员管理。所有成员共用本 Opus 的并发容量，上限 4；有在途任务时错开发送，官方限流时自动退避。</p></section><p id="message" role="status"></p></main></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>我的额度 · NovelAI 共享</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23161c2b'/%3E%3Cpath d='M16 5l3 8 8 3-8 3-3 8-3-8-8-3 8-3 3-8z' fill='none' stroke='%23819dff' stroke-width='2.2' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/members.css">
+  <script type="module" src="/account.js"></script>
+</head>
+<body>
+  <main>
+    <section id="login" class="auth-shell" hidden>
+      <div class="auth-card">
+        <div class="auth-header">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3l2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3z"/>
+              </svg>
+            </span>
+            <h1>NovelAI 共享</h1>
+          </div>
+          <p>登录查看个人额度与 API 凭证</p>
+        </div>
+
+        <form id="loginForm">
+          <p id="loginError" class="notice notice-danger" role="alert" hidden></p>
+          <label>
+            用户名
+            <input id="username" autocomplete="username" placeholder="请输入用户名" required maxlength="40">
+          </label>
+          <label>
+            密码
+            <input id="password" type="password" autocomplete="current-password" placeholder="请输入密码" required maxlength="128">
+          </label>
+          <button id="loginSubmit" type="submit">登录</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="account" hidden>
+      <nav class="topbar" aria-label="主导航">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3l2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3z"/>
+            </svg>
+          </span>
+          <span>NovelAI 共享</span>
+        </div>
+
+        <div class="topbar-meta">
+          <span id="userPill" class="pill" hidden>
+            <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="8" r="4"/>
+              <path d="M5 20a7 7 0 0 1 14 0"/>
+            </svg>
+            <strong id="userName"></strong>
+            <span id="userShare"></span>
+          </span>
+          <button id="refresh" type="button" class="secondary btn-sm" title="刷新额度">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+              <path d="M21 3v6h-6"/>
+            </svg>
+            <span>刷新</span>
+          </button>
+          <button id="logout" type="button" class="ghost btn-sm">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16 17 21 12 16 7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            <span>退出</span>
+          </button>
+        </div>
+      </nav>
+
+      <div class="stack">
+        <p id="statusNotice" class="notice notice-warn" role="alert" hidden></p>
+
+        <section class="stack-sm" aria-label="我的额度">
+          <div class="row-between">
+            <h1>我的额度</h1>
+            <span id="fallbackBadge" class="pill pill-accent pill-sm" hidden>V5 不足自动转扣 Anlas</span>
+          </div>
+
+          <div class="quota-primary-grid">
+            <article class="kpi-card is-accent">
+              <div class="kpi-head">
+                <span class="kpi-label">V5 恢复额度</span>
+                <span id="v5ReservedBadge" class="pill pill-warn pill-sm" hidden></span>
+              </div>
+              <div class="kpi-value">
+                <span id="v5Available">—</span><span id="v5Capacity" class="kpi-unit"></span>
+              </div>
+              <div id="v5Meter" class="meter" role="progressbar" aria-label="V5 恢复额度进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div id="v5MeterFill" class="meter-fill"></div>
+              </div>
+              <p id="v5Refill" class="kpi-sub"></p>
+            </article>
+
+            <article class="kpi-card">
+              <div class="kpi-head">
+                <span class="kpi-label">订阅 Anlas</span>
+                <span id="fixedReservedBadge" class="pill pill-warn pill-sm" hidden></span>
+              </div>
+              <div id="fixed" class="kpi-value">—</div>
+            </article>
+
+            <article class="kpi-card">
+              <div class="kpi-head">
+                <span class="kpi-label">购买 Anlas</span>
+                <span id="purchasedReservedBadge" class="pill pill-warn pill-sm" hidden></span>
+              </div>
+              <div id="purchased" class="kpi-value">—</div>
+            </article>
+          </div>
+        </section>
+
+        <section id="sharedStatusMount" class="stack-sm" aria-label="共享池实时状态"></section>
+
+        <section class="key-box" aria-label="API 连接信息">
+          <div class="key-box-head">
+            <h2 class="section-title">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="7.5" cy="15.5" r="4.5"/>
+                <path d="m21 2-9.6 9.6"/>
+                <path d="m15.5 7.5 3 3L22 7l-3-3"/>
+              </svg>
+              <span>API 连接信息</span>
+            </h2>
+            <button id="toggleKey" type="button" class="secondary btn-sm">查看 API Key</button>
+          </div>
+
+          <div id="keyFields" class="key-box-grid" hidden>
+            <div class="key-field">
+              <span id="baseUrlLabel" class="key-field-label">Base URL</span>
+              <div class="code-copy">
+                <input id="apiBaseUrl" type="text" readonly placeholder="未配置" aria-labelledby="baseUrlLabel">
+                <button id="copyBaseUrl" type="button" class="secondary btn-sm">复制</button>
+              </div>
+            </div>
+
+            <div class="key-field">
+              <span id="apiKeyLabel" class="key-field-label">API Key</span>
+              <div class="code-copy">
+                <input id="apiKey" type="password" readonly aria-labelledby="apiKeyLabel">
+                <button id="toggleKeyMask" type="button" class="ghost btn-sm btn-icon" aria-label="显示 API Key" title="显示 API Key" aria-pressed="false">
+                  <svg id="eyeShowIcon" class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+                    <circle cx="12" cy="12" r="3"/>
+                  </svg>
+                  <svg id="eyeHideIcon" class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden>
+                    <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/>
+                    <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c6.5 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/>
+                    <path d="M6.61 6.61A13.52 13.52 0 0 0 2 12s3.5 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/>
+                    <line x1="2" y1="2" x2="22" y2="22"/>
+                  </svg>
+                </button>
+                <button id="copyKey" type="button" class="secondary btn-sm">复制</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="surface history-panel" aria-label="最近调用">
+          <div class="row-between">
+            <h2 class="section-title">最近调用</h2>
+            <span id="jobsCount" class="badge">0 条</span>
+          </div>
+
+          <div class="table-wrap table-cards">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>模型</th>
+                  <th>状态</th>
+                  <th>额度记录</th>
+                </tr>
+              </thead>
+              <tbody id="jobs"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <p id="message" class="toast" role="status" aria-live="polite" hidden></p>
+  </main>
+</body>
+</html>

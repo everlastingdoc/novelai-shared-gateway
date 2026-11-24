@@ -1,40 +1,637 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>共享账户控制台</title><link rel="stylesheet" href="/members.css"><link rel="stylesheet" href="/admin/members.css"><script type="module" src="/admin/members.js"></script></head>
-<body><main>
-<header class="page-header"><div><h1>共享账户控制台</h1><p id="connectedHint" class="muted">私有管理入口</p></div><div id="topActions" class="toolbar" hidden><button id="refresh" class="secondary">刷新状态</button><button id="disconnect" class="secondary">退出管理</button></div></header>
-<form id="connect"><h2>管理员登录</h2><label>管理员 Key<input id="adminToken" type="password" autocomplete="off" required></label><label><input id="remember" type="checkbox" checked>在当前浏览器会话中记住</label><button type="submit">进入控制台</button></form>
-<div id="dashboard" hidden>
-<div class="cards overview"><article><h2>订阅剩余点数</h2><strong id="overviewAnlas">—</strong><p id="overviewPurchased" hidden></p><p id="overviewDate">等待同步</p></article><article><h2>共享 V5 余量</h2><strong id="overviewV5">—</strong><progress id="overviewBar" max="100" value="0" aria-label="共享 V5 余量"></progress><p id="overviewRecovery">持续恢复</p></article><article><h2>正在生成 / 等待</h2><strong id="overviewQueue">—</strong><p id="overviewMembers"></p><p id="overviewStatus"></p></article></div>
-<nav class="tabs" role="tablist" aria-label="管理功能"><button type="button" role="tab" aria-selected="true" data-tab="membersPanel">成员与额度</button><button type="button" role="tab" aria-selected="false" class="secondary" data-tab="settingsPanel">账号设置</button><button type="button" role="tab" aria-selected="false" class="secondary" data-tab="galleryPanel">图库与存储</button></nav>
-<div id="syncNotice" class="notice sync-notice" role="status" hidden><span id="syncText"></span><button id="syncPeriod" class="secondary">同步本期点数</button></div>
-<section id="membersPanel" class="panel">
-<header><div><h2>成员与额度</h2><p id="allocationHint" class="muted">V5 和点数使用同一份额分配。</p></div><div class="toolbar"><button id="editShares" class="secondary">调整份额</button><button id="newMember">＋ 新增成员</button></div></header>
-<div id="memberFilters" class="toolbar list-filters"><input id="search" placeholder="搜索成员" aria-label="搜索成员"><span id="memberCount" class="muted"></span></div>
-<div id="shareActions" class="share-actions" hidden><div><strong id="shareTotal"></strong><p class="muted">保存后重新分配当前 V5 余量和剩余点数，并调整 V5 容量与后续恢复份额。</p></div><div class="toolbar"><button id="equalize" class="secondary">大家均分</button><button id="cancelShares" class="secondary">取消</button><button id="saveShares">保存分配</button></div></div>
-<div class="member-table"><table><thead><tr><th>成员</th><th>份额</th><th>V5 余量 / 容量</th><th>剩余订阅点数</th><th></th></tr></thead><tbody id="members"></tbody></table></div>
-<p class="list-footnote muted">份额同时用于 V5 和点数。V5 随时间恢复；订阅续期后自动分配当期点数。</p>
-</section>
-<section id="settingsPanel" class="panel" hidden><h2>账号设置</h2><div class="setting"><h3>共享 Opus</h3><p id="upstreamStatus"></p><p id="upstreamQuota"></p><p id="upstreamUpdated" class="muted"></p><div class="toolbar"><button id="refreshUpstream" class="secondary">向官方刷新额度</button><button id="toggleUpstream" class="secondary"></button></div></div><div class="setting"><h3>个人 V5 用完后</h3><label><input id="autoFallback" type="checkbox">使用本人的剩余点数继续生成</label><p class="muted">按图片参数估算扣费，失败退款。上游可能仍使用公共 V5；这种情况下，本地点数扣费仍保留。</p><button id="saveFallback">保存设置</button></div><div class="setting"><details><summary>更新共享账号 PST</summary><p class="notice">仅用于同一官方账号的密钥轮换。更新后暂停上游，核验额度后再恢复。</p><form id="upstreamCredentials"><label>新的 PST<input id="upstreamPst" type="password" autocomplete="off" required></label><button id="saveUpstreamPst" class="secondary">更新并暂停上游</button></form></details></div></section>
-<section id="galleryPanel" class="panel" hidden>
-<header><div><h2>图库与存储</h2><span class="muted">按成员 Key 管理服务器上的图片，点击文件名后加载原图。</span></div><button id="galleryRefresh" class="secondary">刷新统计与列表</button></header>
-<p id="galleryLoading" class="muted" role="status" hidden>正在统计图片文件…</p>
-<div class="cards"><article><h2>图片总数</h2><strong id="galleryTotal">—</strong></article><article><h2>图片文件占用</h2><strong id="galleryBytes">—</strong></article><article><h2>已过保存期限</h2><strong id="galleryExpiredCount">—</strong></article><article><h2>缺失 / 不可读文件</h2><strong id="galleryMissing">—</strong></article></div>
-<div class="gallery-settings"><form id="galleryPolicyForm"><label>统一保存天数<input id="galleryDays" type="number" value="3" min="0" max="3650" step="1" required></label><button id="gallerySavePolicy" type="submit">预览并修改</button></form><div><p id="galleryPolicyHint" class="muted">默认保留 3 天；0 表示永久保留。</p><p id="galleryLastCleanup" class="muted"></p></div></div>
-<details open><summary>各个 Key 的图片情况</summary><div class="tablewrap"><table><thead><tr><th>成员 / Key</th><th>数量</th><th>文件占用</th><th>已过期</th><th>缺失 / 不可读</th><th>操作</th></tr></thead><tbody id="galleryKeyRows"></tbody></table></div></details>
-<form id="galleryFilters" class="gallery-filters"><label class="gallery-key-filter">成员 Key<select id="galleryKey"><option value="">全部 Key</option></select></label><label>生成日期从<input id="galleryFrom" type="date"></label><label>至（含当天）<input id="galleryBefore" type="date"></label><label><input id="galleryExpired" type="checkbox">仅过期图片</label><button id="galleryFilter" type="submit" class="secondary">筛选</button></form>
-<div class="gallery-selection"><label><input id="gallerySelectPage" type="checkbox">全选本页</label><span id="gallerySelected" class="muted">已选 0 张</span><button id="galleryDeleteSelected" class="secondary danger" disabled>清理所选图片</button><button id="galleryDeleteFiltered" class="secondary danger" disabled>按当前筛选批量清理</button></div>
-<p class="muted">批量清理须指定 Key、日期或仅过期图片。文件删除后无法恢复，生成和额度消费历史保留。</p>
-<div id="galleryGrid" class="gallery-grid"></div><div class="toolbar gallery-paging"><button id="galleryPrev" class="secondary">上一页</button><span id="galleryPageInfo" class="muted"></span><button id="galleryNext" class="secondary">下一页</button></div>
-</section>
-</div>
-<p id="message" class="toast" role="status" hidden></p>
-<dialog id="memberDialog" class="small"><header><h2 id="memberDialogTitle">新增成员</h2><button type="button" data-close="memberDialog" class="secondary">关闭</button></header><form id="credentials"><input id="editingId" type="hidden"><label>用户名<input id="username" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,39}" maxlength="40" autocomplete="off"></label><label id="newShareLabel" hidden>新成员份额（%）<input id="newShare" type="number" min="0" max="100" step="any"></label><p id="credentialHint" class="notice"></p><details id="passwordDetails"><summary id="passwordSummary">自行设置密码（可选）</summary><label>登录密码（至少 12 位）<div class="password-line"><input id="password" type="password" minlength="12" maxlength="128" autocomplete="new-password"><button id="generatePassword" type="button" class="secondary">随机生成</button><button id="showPassword" type="button" class="secondary">显示</button></div></label></details><p id="autoPasswordHint" class="muted">未填写密码时自动生成，创建后可复制登录信息和个人 Key。</p><button id="saveMember" type="submit">创建并分配额度</button></form></dialog>
-<dialog id="manageDialog" class="small"><header><h2 id="manageName">管理成员</h2><button type="button" data-close="manageDialog" class="secondary">关闭</button></header><p id="manageQuota"></p><p id="managePurchased" hidden></p><div class="manage-actions"><button id="transferMember">转移额度</button><button id="deliverMember" class="secondary">复制分发信息</button><button id="resetPassword" class="secondary">重置密码</button><button id="toggleMember" class="secondary"></button><button id="removeMember" class="secondary danger">删除成员</button></div><p class="muted">停用只暂停使用，保留额度。密码无法回看，需要时请重置。</p></dialog>
-<dialog id="transferDialog" class="small"><header><h2>转移当前额度</h2><button type="button" data-close="transferDialog" class="secondary">关闭</button></header><form id="transferForm"><p>转出成员：<b id="transferFromName"></b></p><input id="transferFrom" type="hidden"><label>接收成员<select id="transferTo" aria-label="接收成员" required></select></label><label>转移内容<select id="transferResource" aria-label="转移内容"><option value="v5">V5 当前余量</option><option value="anlasFixed">订阅点数</option><option value="anlasPurchased">购买点数</option></select></label><label><span id="transferAmountLabel">转移数量（V5 百分点）</span><div class="password-line"><input id="transferAmount" aria-label="转移数量" type="number" min="0.000001" step="any" required><button id="transferAll" type="button" class="secondary">全部转出</button></div></label><p id="transferHint" class="notice" aria-live="polite"></p><p class="muted">仅移动当前余额，双方份额和 V5 容量上限保持不变。</p><p id="transferError" class="danger" role="alert" hidden></p><button id="confirmTransfer" type="submit">确认转移</button></form></dialog>
-<dialog id="deliveryDialog" class="small"><header><h2>成员分发信息</h2><button type="button" data-close="deliveryDialog" class="secondary">关闭</button></header><p class="muted">仅包含这一位成员的信息，请单独发送。</p><textarea id="deliveryText" readonly aria-label="成员分发信息"></textarea><div class="toolbar"><button id="copyDelivery">复制全部信息</button><button type="button" data-close="deliveryDialog" class="secondary">完成</button></div></dialog>
-<dialog id="confirmDialog" class="small"><h2 id="confirmTitle"></h2><p id="confirmDescription"></p><div class="toolbar"><button id="confirmAction">确认</button><button type="button" data-close="confirmDialog" class="secondary">取消</button></div></dialog>
-<dialog id="galleryConfirmDialog" class="small"><h2 id="galleryConfirmTitle"></h2><p id="galleryConfirmText"></p><ul id="galleryConfirmKeys"></ul><p id="galleryConfirmError" class="danger" role="alert" hidden></p><div class="toolbar"><button id="galleryConfirmAction">确认</button><button id="galleryConfirmCancel" class="secondary">取消</button></div></dialog>
-<dialog id="galleryImageDialog"><header><h2 id="galleryImageTitle">图片详情</h2><button id="galleryImageClose" class="secondary">关闭</button></header><p id="galleryImageLoading" class="muted" role="status" hidden></p><button id="galleryImageRetry" class="secondary" hidden>重新加载图片</button><img id="galleryFullImage" alt="生成原图" hidden><p id="galleryImageInfo" class="muted"></p><label>正向提示词<textarea id="galleryPrompt" readonly></textarea></label><div class="toolbar"><button id="galleryCopyPrompt" class="secondary">复制提示词</button><a id="galleryDownload" download hidden>下载原图</a></div></dialog>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>管理员控制台 · NovelAI 共享网关</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111622'/%3E%3Cpath d='M16 5.5 24 8.5v6.8c0 5.4-3.4 9.2-8 11.2-4.6-2-8-5.8-8-11.2V8.5l8-3z' fill='none' stroke='%23819dff' stroke-width='2.2' stroke-linejoin='round'/%3E%3Cpath d='m12.8 16.2 2.2 2.2 4.4-4.6' fill='none' stroke='%2334d399' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/members.css">
+  <link rel="stylesheet" href="/admin/members.css">
+  <link rel="stylesheet" href="/admin/gallery.css">
+  <script type="module" src="/admin/members.js"></script>
+</head>
+<body>
+  <main class="container container-wide">
+    <!-- Logged-in Topbar -->
+    <header id="topbar" class="topbar" hidden>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path d="m9 12 2 2 4-4"/>
+          </svg>
+        </span>
+        <span>管理员控制台</span>
+      </div>
+      <div class="topbar-meta">
+        <span id="connectedPill" class="pill pill-ok">
+          <span id="connectedDot" class="dot dot-ok dot-pulse" aria-hidden="true"></span>
+          <span id="connectedHint">已连接</span>
+        </span>
+        <button id="refresh" type="button" class="secondary btn-sm">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <path d="M21 3v6h-6"/>
+          </svg>
+          <span>刷新</span>
+        </button>
+        <button id="disconnect" type="button" class="ghost btn-sm">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+          <span>退出</span>
+        </button>
+      </div>
+    </header>
 
-</main></body></html>
+    <!-- Auth View -->
+    <section id="authShell" class="auth-shell">
+      <div class="auth-card">
+        <div class="auth-header auth-header-center">
+          <span class="auth-icon" aria-hidden="true">
+            <svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <circle cx="12" cy="11" r="2"/>
+              <path d="M12 13v3"/>
+            </svg>
+          </span>
+          <h1>管理员控制台</h1>
+        </div>
+        <form id="connect">
+          <label class="field">
+            管理员 Key
+            <input id="adminToken" type="password" autocomplete="off" placeholder="输入管理员 Key" required>
+          </label>
+          <label class="check-label">
+            <input id="remember" type="checkbox" checked>
+            <span>当前会话记住</span>
+          </label>
+          <button id="connectSubmit" type="submit" class="btn-lg btn-block">进入控制台</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Main Dashboard -->
+    <div id="dashboard" class="stack" hidden>
+      <!-- Overview KPI Row -->
+      <section class="overview-section" aria-label="系统概览">
+        <div class="kpi-grid kpi-grid-3 overview">
+          <article class="kpi-card">
+            <div class="kpi-head">
+              <span class="kpi-label">订阅剩余点数</span>
+              <span id="overviewDate" class="pill pill-sm pill-muted">等待同步</span>
+            </div>
+            <strong id="overviewAnlas" class="kpi-value">—</strong>
+            <div class="kpi-extras">
+              <span id="overviewPurchased" class="pill pill-sm pill-accent" hidden></span>
+            </div>
+          </article>
+
+          <article class="kpi-card is-accent">
+            <div class="kpi-head">
+              <span class="kpi-label">共享 V5 余量</span>
+              <span id="overviewRecovery" class="pill pill-sm pill-muted" hidden></span>
+            </div>
+            <strong id="overviewV5" class="kpi-value">—</strong>
+            <div id="overviewMeter" class="meter" role="progressbar" aria-label="共享 V5 余量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="overviewBar" class="meter-fill"></div>
+            </div>
+          </article>
+
+          <article class="kpi-card">
+            <div class="kpi-head">
+              <span class="kpi-label">运行 / 排队</span>
+              <span id="overviewStatus" class="pill pill-sm pill-muted">
+                <span id="overviewStatusDot" class="dot dot-muted" aria-hidden="true"></span>
+                <span id="overviewStatusText">等待核验</span>
+              </span>
+            </div>
+            <strong id="overviewQueue" class="kpi-value">—</strong>
+            <p id="overviewMembers" class="kpi-sub"></p>
+          </article>
+        </div>
+
+        <!-- Optional Runtime Telemetry (hidden when all metrics are zero) -->
+        <div id="telemetryStrip" class="telemetry-bar" hidden></div>
+      </section>
+
+      <!-- Action-required Sync Notice -->
+      <div id="syncNotice" class="notice notice-warn notice-row sync-notice" role="status" hidden>
+        <div class="sync-notice-body">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <span id="syncText"></span>
+        </div>
+        <button id="syncPeriod" type="button" class="secondary btn-sm">同步本期点数</button>
+      </div>
+
+      <!-- Segmented Tabs -->
+      <nav class="tabs admin-tabs" role="tablist" aria-label="管理功能">
+        <button type="button" role="tab" aria-selected="true" data-tab="membersPanel">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          <span>成员与额度</span>
+          <span id="tabMemberBadge" class="tab-badge" hidden>0</span>
+        </button>
+        <button type="button" role="tab" aria-selected="false" data-tab="settingsPanel">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="4" y1="21" x2="4" y2="14"/>
+            <line x1="4" y1="10" x2="4" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12" y2="3"/>
+            <line x1="20" y1="21" x2="20" y2="16"/>
+            <line x1="20" y1="12" x2="20" y2="3"/>
+            <line x1="1" y1="14" x2="7" y2="14"/>
+            <line x1="9" y1="8" x2="15" y2="8"/>
+            <line x1="17" y1="16" x2="23" y2="16"/>
+          </svg>
+          <span>账号设置</span>
+        </button>
+        <button type="button" role="tab" aria-selected="false" data-tab="galleryPanel">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+          <span>图库与存储</span>
+        </button>
+      </nav>
+
+      <!-- Tab 1: Members & Quota -->
+      <section id="membersPanel" class="surface members-panel">
+        <div class="section-header">
+          <div class="section-title">
+            <h2>成员与额度</h2>
+            <span id="shareModeBadge" class="pill pill-sm pill-accent">均分</span>
+          </div>
+          <div class="toolbar">
+            <button id="editShares" type="button" class="secondary btn-sm">调整份额</button>
+            <button id="newMember" type="button" class="btn-sm">
+              <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              <span>新增成员</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="memberFilters" class="row-between list-filters">
+          <div class="search-box">
+            <svg class="icon icon-sm search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input id="search" type="search" class="input-sm" placeholder="搜索成员" aria-label="搜索成员">
+          </div>
+          <span id="memberCount" class="pill pill-sm pill-muted tabular"></span>
+        </div>
+
+        <div id="shareActions" class="share-actions" hidden>
+          <span id="shareTotal" class="pill pill-ok tabular">已分配 100%</span>
+          <div class="toolbar">
+            <button id="equalize" type="button" class="secondary btn-sm">大家均分</button>
+            <button id="cancelShares" type="button" class="ghost btn-sm">取消</button>
+            <button id="saveShares" type="button" class="btn-sm">保存分配</button>
+          </div>
+        </div>
+
+        <div id="memberTableWrap" class="member-table table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>成员</th>
+                <th>份额</th>
+                <th>V5 余量 / 容量</th>
+                <th>订阅点数</th>
+                <th class="cell-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody id="members"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Tab 2: Account Settings -->
+      <section id="settingsPanel" class="stack" hidden>
+        <div class="surface setting-card">
+          <div class="section-header">
+            <div class="section-title">
+              <h3>共享 Opus 上游</h3>
+              <span id="upstreamStatePill" class="pill pill-sm pill-muted">等待绑定</span>
+              <span id="upstreamTierPill" class="pill pill-sm pill-accent" hidden>Opus</span>
+              <span id="upstreamErrorPill" class="pill pill-sm pill-danger" hidden>查询失败</span>
+            </div>
+            <div class="toolbar">
+              <button id="refreshUpstream" type="button" class="secondary btn-sm">刷新额度</button>
+              <button id="toggleUpstream" type="button" class="secondary btn-sm">暂停使用</button>
+            </div>
+          </div>
+          <div class="upstream-metrics">
+            <div class="upstream-metric">
+              <span class="status-metric-label">V5 余量</span>
+              <strong id="upstreamV5" class="status-metric-value">—</strong>
+            </div>
+            <div class="upstream-metric">
+              <span class="status-metric-label">订阅点数</span>
+              <strong id="upstreamFixed" class="status-metric-value">—</strong>
+            </div>
+            <div id="upstreamPurchasedItem" class="upstream-metric" hidden>
+              <span class="status-metric-label">购买点数</span>
+              <strong id="upstreamPurchased" class="status-metric-value">—</strong>
+            </div>
+            <div class="upstream-metric">
+              <span class="status-metric-label">上次核验</span>
+              <span id="upstreamUpdated" class="status-metric-value upstream-time">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="surface setting-card">
+          <div class="row-between setting-toggle-row">
+            <div class="setting-toggle-copy">
+              <label class="switch">
+                <input id="autoFallback" type="checkbox">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span>V5 用完转扣点数</span>
+              </label>
+              <p class="muted">按参数估算扣减个人本地 Anlas，失败自动退回</p>
+            </div>
+            <button id="saveFallback" type="button" class="btn-sm">保存设置</button>
+          </div>
+        </div>
+
+        <div class="surface setting-card setting-card-flush">
+          <details id="pstDetails" class="pst-details">
+            <summary>更新共享账号 PST</summary>
+            <div class="pst-body stack-sm">
+              <p class="notice notice-warn">仅限同一官方账号轮换，更新后自动暂停待核验</p>
+              <form id="upstreamCredentials" class="pst-form">
+                <input id="upstreamPst" type="password" autocomplete="off" placeholder="输入新的 pst-..." aria-label="新的 PST" required>
+                <button id="saveUpstreamPst" type="submit" class="secondary">更新并暂停上游</button>
+              </form>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- Tab 3: Gallery & Storage -->
+      <section id="galleryPanel" class="stack" hidden>
+        <div class="row-between gallery-top">
+          <div class="section-title">
+            <h2>图库与存储</h2>
+            <span id="galleryLoading" class="pill pill-sm pill-accent" role="status" hidden>
+              <span class="spinner" aria-hidden="true"></span>
+              <span>统计中…</span>
+            </span>
+          </div>
+          <button id="galleryRefresh" type="button" class="secondary btn-sm">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+              <path d="M21 3v6h-6"/>
+            </svg>
+            <span>刷新</span>
+          </button>
+        </div>
+
+        <div class="kpi-grid kpi-grid-4 gallery-kpis">
+          <article class="kpi-card">
+            <span class="kpi-label">图片总数</span>
+            <strong id="galleryTotal" class="kpi-value">—</strong>
+          </article>
+          <article class="kpi-card">
+            <span class="kpi-label">磁盘占用</span>
+            <strong id="galleryBytes" class="kpi-value">—</strong>
+          </article>
+          <article id="galleryExpiredCard" class="kpi-card">
+            <span class="kpi-label">已过期</span>
+            <strong id="galleryExpiredCount" class="kpi-value">—</strong>
+          </article>
+          <article id="galleryMissingCard" class="kpi-card">
+            <span class="kpi-label">异常文件</span>
+            <strong id="galleryMissing" class="kpi-value">—</strong>
+          </article>
+        </div>
+
+        <div class="surface gallery-policy-bar">
+          <form id="galleryPolicyForm" class="gallery-policy-form">
+            <label class="inline-field">
+              <span>保存天数</span>
+              <input id="galleryDays" class="input-sm" type="number" value="3" min="0" max="3650" step="1" required>
+            </label>
+            <button id="gallerySavePolicy" type="submit" class="secondary btn-sm">预览修改</button>
+          </form>
+          <div class="gallery-policy-meta">
+            <span id="galleryPolicyBadge" class="pill pill-sm pill-accent">保留 3 天</span>
+            <span id="galleryLastCleanup" class="pill pill-sm pill-muted" hidden></span>
+          </div>
+        </div>
+
+        <details class="gallery-keys-details" open>
+          <summary>
+            <span class="row">
+              <span>按 Key 统计</span>
+              <span id="galleryKeyCountBadge" class="pill pill-sm pill-muted" hidden></span>
+            </span>
+          </summary>
+          <div class="table-wrap gallery-keys-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>成员 / Key</th>
+                  <th>数量</th>
+                  <th>占用</th>
+                  <th>已过期</th>
+                  <th>异常</th>
+                  <th class="cell-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="galleryKeyRows"></tbody>
+            </table>
+          </div>
+        </details>
+
+        <div class="surface gallery-browser stack-sm">
+          <form id="galleryFilters" class="gallery-filters">
+            <label class="gallery-filter-field gallery-key-filter">
+              <span>成员 Key</span>
+              <select id="galleryKey" class="input-sm">
+                <option value="">全部 Key</option>
+              </select>
+            </label>
+            <label class="gallery-filter-field">
+              <span>起始日期</span>
+              <input id="galleryFrom" type="date" class="input-sm">
+            </label>
+            <label class="gallery-filter-field">
+              <span>截止日期</span>
+              <input id="galleryBefore" type="date" class="input-sm">
+            </label>
+            <label class="check-label gallery-expired-check">
+              <input id="galleryExpired" type="checkbox">
+              <span>仅过期</span>
+            </label>
+            <button id="galleryFilter" type="submit" class="secondary btn-sm">筛选</button>
+          </form>
+
+          <div class="row-between gallery-selection">
+            <div class="row">
+              <label class="check-label">
+                <input id="gallerySelectPage" type="checkbox">
+                <span>全选本页</span>
+              </label>
+              <span id="gallerySelected" class="pill pill-sm pill-muted tabular">已选 0 张</span>
+            </div>
+            <div class="toolbar">
+              <button id="galleryDeleteSelected" type="button" class="danger btn-sm" disabled>清理所选</button>
+              <button id="galleryDeleteFiltered" type="button" class="danger btn-sm" disabled>清理筛选结果</button>
+            </div>
+          </div>
+
+          <div id="galleryGrid" class="gallery-grid"></div>
+
+          <div class="toolbar gallery-paging">
+            <button id="galleryPrev" type="button" class="secondary btn-sm">上一页</button>
+            <span id="galleryPageInfo" class="muted tabular"></span>
+            <button id="galleryNext" type="button" class="secondary btn-sm">下一页</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Toast -->
+    <p id="message" class="toast" role="status" hidden></p>
+
+    <!-- Dialog: Create Member / Reset Password -->
+    <dialog id="memberDialog" class="dialog-sm">
+      <header>
+        <h2 id="memberDialogTitle">新增成员</h2>
+        <button type="button" data-close="memberDialog" class="ghost btn-icon btn-sm" aria-label="关闭">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <form id="credentials" class="stack-sm">
+        <input id="editingId" type="hidden">
+        <label class="field">
+          用户名
+          <input id="username" required pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,39}" maxlength="40" autocomplete="off" placeholder="3–40 位字母、数字、_ . -">
+        </label>
+        <label id="newShareLabel" class="field" hidden>
+          新成员份额（%）
+          <input id="newShare" type="number" min="0" max="100" step="any">
+        </label>
+        <p id="credentialHint" class="notice"></p>
+        <details id="passwordDetails">
+          <summary id="passwordSummary">自行设置密码（留空自动生成）</summary>
+          <label class="field">
+            登录密码（至少 12 位）
+            <div class="password-line">
+              <input id="password" type="password" minlength="12" maxlength="128" autocomplete="new-password">
+              <button id="generatePassword" type="button" class="secondary btn-sm">随机生成</button>
+              <button id="showPassword" type="button" class="secondary btn-sm">显示</button>
+            </div>
+          </label>
+        </details>
+        <div class="dialog-footer">
+          <button type="button" data-close="memberDialog" class="secondary">取消</button>
+          <button id="saveMember" type="submit">创建并分配额度</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Dialog: Manage Member -->
+    <dialog id="manageDialog" class="dialog-sm">
+      <header>
+        <div class="row">
+          <h2 id="manageName">管理成员</h2>
+          <span id="manageStatusPill" class="pill pill-sm pill-ok">已启用</span>
+        </div>
+        <button type="button" data-close="manageDialog" class="ghost btn-icon btn-sm" aria-label="关闭">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <div id="managePills" class="manage-pills"></div>
+      <div class="manage-actions">
+        <button id="resetPassword" type="button" class="secondary">重置密码</button>
+        <button id="toggleMember" type="button" class="secondary">停用成员</button>
+        <button id="removeMember" type="button" class="danger manage-remove">删除成员</button>
+      </div>
+    </dialog>
+
+    <!-- Dialog: Transfer Quota -->
+    <dialog id="transferDialog" class="dialog-sm">
+      <header>
+        <h2>转移当前额度</h2>
+        <button type="button" data-close="transferDialog" class="ghost btn-icon btn-sm" aria-label="关闭">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <form id="transferForm" class="stack-sm">
+        <input id="transferFrom" type="hidden">
+        <div class="transfer-route">
+          <div class="transfer-party">
+            <span class="field-label">转出</span>
+            <strong id="transferFromName" class="transfer-from-box"></strong>
+          </div>
+          <span class="transfer-arrow" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"/>
+              <polyline points="12 5 19 12 12 19"/>
+            </svg>
+          </span>
+          <label class="transfer-party">
+            <span class="field-label">接收</span>
+            <select id="transferTo" aria-label="接收成员" required></select>
+          </label>
+        </div>
+
+        <label class="field">
+          转移内容
+          <select id="transferResource" aria-label="转移内容">
+            <option value="v5">V5 当前余量</option>
+            <option value="anlasFixed">订阅点数</option>
+            <option value="anlasPurchased">购买点数</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span id="transferAmountLabel">转移数量（V5 %）</span>
+          <div class="input-group">
+            <input id="transferAmount" aria-label="转移数量" type="number" min="0.000001" step="any" required>
+            <button id="transferAll" type="button" class="secondary btn-sm">全部转出</button>
+          </div>
+        </label>
+
+        <div id="transferHint" class="notice transfer-preview" aria-live="polite"></div>
+        <p id="transferError" class="notice notice-danger" role="alert" hidden></p>
+
+        <div class="dialog-footer">
+          <button type="button" data-close="transferDialog" class="secondary">取消</button>
+          <button id="confirmTransfer" type="submit">确认转移</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Dialog: Member Delivery Credentials -->
+    <dialog id="deliveryDialog" class="dialog-sm">
+      <header>
+        <h2>成员分发信息</h2>
+        <button type="button" data-close="deliveryDialog" class="ghost btn-icon btn-sm" aria-label="关闭">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <textarea id="deliveryText" readonly aria-label="成员分发信息"></textarea>
+      <div class="dialog-footer">
+        <button type="button" data-close="deliveryDialog" class="secondary">完成</button>
+        <button id="copyDelivery" type="button">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <span>复制全部信息</span>
+        </button>
+      </div>
+    </dialog>
+
+    <!-- Dialog: Confirm Action -->
+    <dialog id="confirmDialog" class="dialog-sm">
+      <header>
+        <h2 id="confirmTitle"></h2>
+        <button type="button" data-close="confirmDialog" class="ghost btn-icon btn-sm" aria-label="关闭">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <p id="confirmDescription" class="confirm-desc"></p>
+      <div class="dialog-footer">
+        <button type="button" data-close="confirmDialog" class="secondary">取消</button>
+        <button id="confirmAction" type="button">确认</button>
+      </div>
+    </dialog>
+
+    <!-- Dialog: Gallery Confirm -->
+    <dialog id="galleryConfirmDialog" class="dialog-sm">
+      <header>
+        <h2 id="galleryConfirmTitle"></h2>
+      </header>
+      <p id="galleryConfirmText" class="confirm-desc"></p>
+      <ul id="galleryConfirmKeys" class="gallery-confirm-keys" hidden></ul>
+      <p id="galleryConfirmError" class="notice notice-danger" role="alert" hidden></p>
+      <div class="dialog-footer">
+        <button id="galleryConfirmCancel" type="button" class="secondary">取消</button>
+        <button id="galleryConfirmAction" type="button">确认</button>
+      </div>
+    </dialog>
+
+    <!-- Dialog: Gallery Image Viewer -->
+    <dialog id="galleryImageDialog" class="dialog-xl">
+      <header>
+        <h2 id="galleryImageTitle" class="mono">图片详情</h2>
+        <button id="galleryImageClose" type="button" class="ghost btn-icon btn-sm" aria-label="关闭">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </header>
+      <div class="gallery-viewer-body stack-sm">
+        <div class="gallery-stage">
+          <div id="galleryImageLoading" class="gallery-stage-status" role="status" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="galleryImageLoadingText">正在加载原图…</span>
+          </div>
+          <button id="galleryImageRetry" type="button" class="secondary btn-sm" hidden>重新加载</button>
+          <img id="galleryFullImage" alt="生成原图" hidden>
+        </div>
+
+        <div id="galleryImageMeta" class="gallery-image-meta"></div>
+
+        <details class="gallery-prompt-box" open>
+          <summary>正向提示词</summary>
+          <textarea id="galleryPrompt" readonly aria-label="正向提示词"></textarea>
+        </details>
+      </div>
+      <div class="dialog-footer">
+        <button id="galleryCopyPrompt" type="button" class="secondary">
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <span>复制提示词</span>
+        </button>
+        <a id="galleryDownload" class="btn" download hidden>
+          <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span>下载原图</span>
+        </a>
+      </div>
+    </dialog>
+  </main>
+</body>
+</html>
